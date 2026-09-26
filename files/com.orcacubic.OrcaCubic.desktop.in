@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OrcaCubic
+Comment=3D printing slicer with Anycubic Kobra X LAN support
+Icon=orcacubic
+Exec=@PREFIX@/bin/orcacubic %F
+Terminal=false
+Categories=Graphics;3DGraphics;

@@ -1,0 +1,2148 @@
+diff --git a/.gitattributes b/.gitattributes
+index 472a0b2d..8bf83693 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -10,3 +10,6 @@
+ # resume after `call :label`. With LF endings that offset can land wrong and the
+ # label lookup fails, so keep these CRLF whatever the platform.
+ *.bat text eol=crlf
++
++# Unified-diff context lines may contain a single required leading space.
++deps/wxInspector/*.patch whitespace=-blank-at-eol
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cf14c4d8..b7201a9c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -169,7 +169,7 @@ if(ORCA_BUNDLED_UV_EXECUTABLE MATCHES "/\\.uv/")
+     set(ORCA_BUNDLED_UV_EXECUTABLE "" CACHE FILEPATH "Path to the auto-downloaded uv executable" FORCE)
+ endif()
+ 
+-if(NOT ORCA_BUNDLED_UV_EXECUTABLE)
++if(NOT ORCA_BUNDLED_UV_EXECUTABLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     if(NOT EXISTS "${ORCA_UV_BINARY}")
+         # Select uv by TARGET arch. On macOS universal builds each leg sets a single
+         # CMAKE_OSX_ARCHITECTURES (and the x86_64 leg cross-builds on an arm64 runner),
+@@ -746,13 +746,27 @@ endif()
+ # boost::process was introduced first in version 1.64.0,
+ # boost::beast::detail::base64 was introduced first in version 1.66.0
+ if(POLICY CMP0167)
+-  cmake_policy(SET CMP0167 NEW)
++  # FreeBSD's Boost package exposes the aggregate BoostConfig.cmake but not
++  # per-component config packages. Use CMake's FindBoost module there.
++  if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    cmake_policy(SET CMP0167 OLD)
++  else()
++    cmake_policy(SET CMP0167 NEW)
++  endif()
++endif()
++if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    set(Boost_NO_SYSTEM_PATHS FALSE)
++else()
++    set(Boost_NO_SYSTEM_PATHS TRUE)
+ endif()
+-set(Boost_NO_SYSTEM_PATHS TRUE)
+ find_package(Boost 1.83.0 REQUIRED COMPONENTS system filesystem thread log log_setup locale regex chrono atomic date_time iostreams program_options nowide)
+ 
+ # Find and configure Eigen3
+-find_package(Eigen3 5.0.1 REQUIRED)
++if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    find_package(Eigen3 3.4 REQUIRED)
++else()
++    find_package(Eigen3 5.0.1 REQUIRED)
++endif()
+ 
+ add_library(boost_libs INTERFACE)
+ add_library(boost_headeronly INTERFACE)
+@@ -916,7 +930,9 @@ endforeach()
+ 
+ find_package(NLopt 1.4 REQUIRED)
+ 
+-# Use bundled Python from deps instead of system Python
++# Use bundled Python from deps instead of system Python.
++# FreeBSD packages the interpreter, development headers and shared library as
++# one coherent system installation, so use the version selected by CMake.
+ set(_bundled_python_version "3.12.13")
+ set(_bundled_python_abi "312")
+ string(REGEX REPLACE "^([0-9]+\\.[0-9]+)\\..*$" "\\1" _bundled_python_version_short "${_bundled_python_version}")
+@@ -974,11 +990,18 @@ elseif(APPLE)
+     set(Python3_EXECUTABLE "${_bundled_python_executable}" CACHE FILEPATH "Bundled Python executable" FORCE)
+     set(Python3_INCLUDE_DIR "${_bundled_python_include_dir}" CACHE PATH "Bundled Python include directory" FORCE)
+     set(Python3_LIBRARY "${_bundled_python_library}" CACHE FILEPATH "Bundled Python embed library" FORCE)
++elseif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    find_package(Python3 3 REQUIRED COMPONENTS Interpreter Development.Embed)
++    get_filename_component(_bundled_python_root "${Python3_STDLIB}" DIRECTORY)
++    get_filename_component(_bundled_python_root "${_bundled_python_root}" DIRECTORY)
++    set(Python3_ROOT_DIR "${_bundled_python_root}" CACHE PATH "Root directory for the FreeBSD Python runtime" FORCE)
+ endif()
+ 
+-find_package(Python3 ${_bundled_python_version} EXACT REQUIRED
+-    COMPONENTS Interpreter Development.Embed
+-)
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    find_package(Python3 ${_bundled_python_version} EXACT REQUIRED
++        COMPONENTS Interpreter Development.Embed
++    )
++endif()
+ 
+ # Provide a minimal pybind11::embed target sourced from deps_src/pybind11 headers.
+ set(PYBIND11_SOURCE_DIR "${CMAKE_SOURCE_DIR}/deps_src/pybind11")
+diff --git a/README.md b/README.md
+index d38fa677..554d6cf4 100644
+--- a/README.md
++++ b/README.md
+@@ -101,7 +101,9 @@ The Device tab provides an Anycubic-style dashboard with:
+ 
+ ## For contributors
+ 
+-See [BUILD_WIN.md](BUILD_WIN.md) to build OrcaCubic on Windows. Additional upstream build information is available in the [OrcaSlicer documentation](https://github.com/OrcaSlicer/OrcaSlicer/wiki/How-to-build).
++See [BUILD_WIN.md](BUILD_WIN.md) to build OrcaCubic on Windows or
++[BUILD_FREEBSD.md](BUILD_FREEBSD.md) for the tested native FreeBSD build.
++Additional upstream build information is available in the [OrcaSlicer documentation](https://github.com/OrcaSlicer/OrcaSlicer/wiki/How-to-build).
+ 
+ ## Thanks and upstream projects
+ 
+diff --git a/cmake/modules/Findlibnoise.cmake b/cmake/modules/Findlibnoise.cmake
+index 74e3a5ea..5a6e0ace 100644
+--- a/cmake/modules/Findlibnoise.cmake
++++ b/cmake/modules/Findlibnoise.cmake
+@@ -1,6 +1,6 @@
+-find_path(LIBNOISE_INCLUDE_DIR libnoise/noise.h)
+-find_library(LIBNOISE_LIBRARY_RELEASE NAMES libnoise libnoise_static liblibnoise_static)
+-find_library(LIBNOISE_LIBRARY_DEBUG NAMES libnoised libnoise_staticd liblibnoise_staticd)
++find_path(LIBNOISE_INCLUDE_DIR NAMES noise/noise.h libnoise/noise.h)
++find_library(LIBNOISE_LIBRARY_RELEASE NAMES noise noise_static libnoise libnoise_static)
++find_library(LIBNOISE_LIBRARY_DEBUG NAMES noised noise_staticd libnoised libnoise_staticd)
+ 
+ set(libnoise_LIB_FOUND FALSE)
+ if (LIBNOISE_LIBRARY_RELEASE OR LIBNOISE_LIBRARY_DEBUG)
+@@ -14,7 +14,7 @@ find_package_handle_standard_args(libnoise DEFAULT_MSG
+ )
+ 
+ if(libnoise_FOUND)
+-    add_library(noise::noise STATIC IMPORTED)
++    add_library(noise::noise UNKNOWN IMPORTED)
+ 
+     set_target_properties(noise::noise PROPERTIES
+             INTERFACE_INCLUDE_DIRECTORIES "${LIBNOISE_INCLUDE_DIR}"
+@@ -38,4 +38,4 @@ if(libnoise_FOUND)
+         set_property(TARGET noise::noise APPEND PROPERTY IMPORTED_CONFIGURATIONS DEBUG)
+         set_target_properties(noise::noise PROPERTIES IMPORTED_LOCATION_DEBUG ${LIBNOISE_LIBRARY_DEBUG})
+     endif ()
+-endif()
+\ No newline at end of file
++endif()
+diff --git a/deps/wxInspector/0001-wx-3.2-compat.patch b/deps/wxInspector/0001-wx-3.2-compat.patch
+new file mode 100644
+index 00000000..84e858a2
+--- /dev/null
++++ b/deps/wxInspector/0001-wx-3.2-compat.patch
+@@ -0,0 +1,141 @@
++From: OrcaCubic FreeBSD port
++Subject: [PATCH] Support wxWidgets 3.2
++
++wxInspector v1.0.0 uses wxWidgets 3.3 APIs that are not present in the
++wxWidgets 3.2 package provided by FreeBSD. Keep the newer APIs when they are
++available and use their 3.2 equivalents otherwise.
++
++---
++ src/highlighter.cpp       | 19 +++++++++++++++----
++ src/info.cpp              | 10 ++++++++--
++ src/method_registry.cpp   |  3 ++-
++ src/property_provider.cpp |  3 ++-
++ 4 files changed, 27 insertions(+), 8 deletions(-)
++
++diff --git a/src/highlighter.cpp b/src/highlighter.cpp
++index 7449233..9563c1d 100644
++--- a/src/highlighter.cpp
+++++ b/src/highlighter.cpp
++@@ -2,7 +2,20 @@
++ #include <wx/window.h>
++ #include <wx/sizer.h>
++ #include <wx/toplevel.h>
+++#include <wx/dcclient.h>
++ 
+++#if wxCHECK_VERSION(3, 3, 0)
+++#define WXINSPECTOR_OVERLAY_DC(name, overlay, window) \
+++    wxOverlayDC name(overlay, window);                 \
+++    name.Clear()
+++#else
+++#define WXINSPECTOR_OVERLAY_DC(name, overlay, window) \
+++    wxClientDC name##_client(window);                  \
+++    wxDCOverlay name##_overlay(overlay, &name##_client); \
+++    name##_overlay.Clear();                            \
+++    wxDC& name = name##_client
+++#endif
+++
++ namespace wxInspector {
++ 
++ static const int HIGHLIGHT_DURATION_MS = 3000;
++@@ -96,8 +109,7 @@ void InspectionHighlighter::DrawWindowHighlight(wxWindow* win)
++         // by the window system), wxOverlayDC draws through a transparent
++         // overlay window that stays on top until m_overlay.Reset().
++         wxWindow* tlwParent = wxGetTopLevelParent(win);
++-        wxOverlayDC dc(*m_overlay, tlwParent);
++-        dc.Clear();
+++        WXINSPECTOR_OVERLAY_DC(dc, *m_overlay, tlwParent);
++         dc.SetPen(wxPen(*wxGREEN, 3));
++         dc.SetBrush(*wxTRANSPARENT_BRUSH);
++         wxPoint origin = tlwParent->ScreenToClient(win->GetScreenPosition());
++@@ -114,8 +126,7 @@ void InspectionHighlighter::DrawSizerHighlight(wxSizer* sizer, wxWindow* relati
++     // Use wxOverlayDC on the containing window — sizer positions are
++     // already relative to the containing window's client area, so no
++     // coordinate conversion is needed.
++-    wxOverlayDC dc(*m_overlay, relativeTo);
++-	dc.Clear();
+++    WXINSPECTOR_OVERLAY_DC(dc, *m_overlay, relativeTo);
++ 
++     // Green outline for sizer boundary
++     dc.SetPen(wxPen(*wxGREEN, 2));
++@@ -149,8 +160,7 @@ void InspectionHighlighter::DrawSizerItemHighlight(wxSizerItem* item, wxWindow*
++         if (!relativeTo) return;
++ 
++         wxRect rect = item->GetRect();
++-        wxOverlayDC dc(*m_overlay, relativeTo);
++-        dc.Clear();
+++        WXINSPECTOR_OVERLAY_DC(dc, *m_overlay, relativeTo);
++         dc.SetPen(wxPen(*wxGREEN, 2));
++         dc.SetBrush(*wxTRANSPARENT_BRUSH);
++         dc.DrawRectangle(rect);
++@@ -162,8 +172,7 @@ void InspectionHighlighter::DrawSizerItemHighlight(wxSizerItem* item, wxWindow*
++         if (!relativeTo) return;
++ 
++         wxRect rect = item->GetRect();
++-        wxOverlayDC dc(*m_overlay, relativeTo);
++-        dc.Clear();
+++        WXINSPECTOR_OVERLAY_DC(dc, *m_overlay, relativeTo);
++         dc.SetPen(wxPen(*wxGREEN, 2));
++         dc.SetBrush(*wxTRANSPARENT_BRUSH);
++         dc.DrawRectangle(rect);
++diff --git a/src/info.cpp b/src/info.cpp
++index f2afe90..6bae087 100644
++--- a/src/info.cpp
+++++ b/src/info.cpp
++@@ -1,4 +1,10 @@
++ #include "wx/inspector/info.h"
+++
+++#if wxCHECK_VERSION(3, 3, 0)
+++#define WXINSPECTOR_READ_ONLY_FLAG wxPGFlags::ReadOnly
+++#else
+++#define WXINSPECTOR_READ_ONLY_FLAG wxPG_PROP_READONLY
+++#endif
++ #include "wx/inspector/property_provider.h"
++ #include <wx/sizer.h>
++ #include <wx/toplevel.h>
++@@ -67,7 +73,7 @@ void InfoPanel::SetProperties(const wxVector<PropertyDef>& properties)
++         switch (prop.type) {
++         case PropertyType::ReadOnly:
++             pgProp = new wxStringProperty(prop.name, wxPG_LABEL, prop.value);
++-            pgProp->ChangeFlag(wxPGFlags::ReadOnly, true);
+++            pgProp->ChangeFlag(WXINSPECTOR_READ_ONLY_FLAG, true);
++             break;
++         case PropertyType::Boolean:
++             pgProp = new wxBoolProperty(prop.name, wxPG_LABEL,
++@@ -109,7 +115,7 @@ void InfoPanel::SetProperties(const wxVector<PropertyDef>& properties)
++ 
++         if (pgProp) {
++             if (prop.readOnly) {
++-                pgProp->ChangeFlag(wxPGFlags::ReadOnly, true);
+++                pgProp->ChangeFlag(WXINSPECTOR_READ_ONLY_FLAG, true);
++             }
++             // Store the setter in the property's client data
++             // We use a custom approach: store setter index in a map
++diff --git a/src/method_registry.cpp b/src/method_registry.cpp
++index 5cc69bf..0b22b4e 100644
++--- a/src/method_registry.cpp
+++++ b/src/method_registry.cpp
++@@ -258,7 +258,8 @@ wxVector<MethodInfo> MethodRegistry::GetMethods(InspectableObject& obj) const
++     if (!obj.IsValid()) return result;
++     for (auto* plugin : m_plugins) {
++         wxVector<MethodInfo> m = plugin->GetMethods(obj);
++-        result.insert(result.end(), m.begin(), m.end());
+++        for (const auto& method : m)
+++            result.push_back(method);
++     }
++     return result;
++ }
++diff --git a/src/property_provider.cpp b/src/property_provider.cpp
++index 4db6d8d..7f31b7e 100644
++--- a/src/property_provider.cpp
+++++ b/src/property_provider.cpp
++@@ -372,7 +372,8 @@ wxVector<PropertyDef> PropertyProvider::GetProperties(InspectableObject& obj) c
++     for (auto* plugin : m_plugins) {
++         if (plugin->CanProvideProperties(info)) {
++             wxVector<PropertyDef> p = plugin->GetProperties(obj);
++-            result.insert(result.end(), p.begin(), p.end());
+++            for (const auto& property : p)
+++                result.push_back(property);
++         }
++     }
++     return result;
++ }
+diff --git a/deps/wxInspector/wxInspector.cmake b/deps/wxInspector/wxInspector.cmake
+index 4a5b2840..2d67749a 100644
+--- a/deps/wxInspector/wxInspector.cmake
++++ b/deps/wxInspector/wxInspector.cmake
+@@ -4,6 +4,7 @@
+ # directory wxWidgets actually used, derived the same way wxWidgetsConfig.cmake
+ # derives it.
+ set(_wxinspector_wx_hints "")
++set(_wxinspector_patch_step "")
+ if (MSVC)
+     if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+         set(_wx_compiler_prefix "clang")
+@@ -21,6 +22,13 @@ if (MSVC)
+         "-DwxWidgets_LIB_DIR=${DESTDIR}/lib/${_wx_compiler_prefix}${_wx_arch_suffix}_lib")
+ endif ()
+ 
++if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    find_program(_wxinspector_patch_executable patch REQUIRED)
++    set(_wxinspector_patch_step
++        PATCH_COMMAND ${_wxinspector_patch_executable} -p1 -V none --batch --forward -i
++            ${CMAKE_CURRENT_LIST_DIR}/0001-wx-3.2-compat.patch)
++endif ()
++
+ orcaslicer_add_cmake_project(
+     wxInspector
+     URL https://github.com/Noisyfox/wxInspector/archive/refs/tags/v1.0.0.zip
+@@ -30,6 +38,7 @@ orcaslicer_add_cmake_project(
+         -DCMAKE_CXX_FLAGS="-DwxDEBUG_LEVEL=0"
+         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+         ${_wxinspector_wx_hints}
++    ${_wxinspector_patch_step}
+ )
+ 
+ if (MSVC)
+diff --git a/deps_src/CMakeLists.txt b/deps_src/CMakeLists.txt
+index a4d71c6f..3c66db26 100644
+--- a/deps_src/CMakeLists.txt
++++ b/deps_src/CMakeLists.txt
+@@ -19,7 +19,14 @@ add_subdirectory(clipper)
+ add_subdirectory(clipper2)
+ add_subdirectory(expat)
+ add_subdirectory(glu-libtess)
+-add_subdirectory(hidapi)
++if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    find_package(PkgConfig REQUIRED)
++    pkg_check_modules(HIDAPI REQUIRED IMPORTED_TARGET hidapi)
++    add_library(hidapi INTERFACE)
++    target_link_libraries(hidapi INTERFACE PkgConfig::HIDAPI)
++else ()
++    add_subdirectory(hidapi)
++endif ()
+ add_subdirectory(hints)        # Hints library with utility executable
+ add_subdirectory(imgui)
+ add_subdirectory(imguizmo)
+diff --git a/resources/scripts/anycubic_lan_daemon.py b/resources/scripts/anycubic_lan_daemon.py
+index a30cce13..641f0f45 100644
+--- a/resources/scripts/anycubic_lan_daemon.py
++++ b/resources/scripts/anycubic_lan_daemon.py
+@@ -28,7 +28,12 @@ if not PRINTER_IP:
+     raise SystemExit("Usage: anycubic_lan_daemon.py <printer-ip> (or set ORCACUBIC_PRINTER_IP)")
+ BRIDGE_TOKEN = os.environ.get("ORCACUBIC_BRIDGE_TOKEN", "").strip()
+ if len(sys.argv) > 2 and sys.argv[2].strip():
+-    BRIDGE_TOKEN = sys.argv[2].strip()
++    token_arg = sys.argv[2].strip()
++    if token_arg.startswith("@"):
++        with open(token_arg[1:], "r", encoding="ascii") as token_file:
++            BRIDGE_TOKEN = token_file.readline().strip()
++    else:
++        BRIDGE_TOKEN = token_arg
+ if not BRIDGE_TOKEN:
+     raise SystemExit("Missing OrcaCubic bridge authentication token")
+ PRINTER_HTTP_PORT = 18910
+@@ -299,11 +304,16 @@ def fetch_credentials():
+ 
+ def on_mqtt_connect(c, userdata, flags, rc, properties=None):
+     global telemetry
+-    print(f"[Bridge] MQTT connected, rc={rc}")
+-    telemetry["connected"] = True
++    print(f"[Bridge] MQTT connect result, rc={rc}")
++    telemetry["connected"] = rc == 0
++    if not telemetry["connected"]:
++        return
+     c.subscribe(f"anycubic/anycubicCloud/v1/printer/public/{model_id}/{device_id}/#")
+     query_all()
+ 
++def on_mqtt_disconnect(c, userdata, flags, rc, properties=None):
++    telemetry["connected"] = False
++
+ def on_mqtt_message(c, userdata, msg):
+     global telemetry, pending_cleanup
+     try:
+@@ -518,6 +528,7 @@ def mqtt_worker():
+             c.tls_set(cert_reqs=ssl.CERT_NONE)
+             c.tls_insecure_set(True)
+             c.on_connect = on_mqtt_connect
++            c.on_disconnect = on_mqtt_disconnect
+             c.on_message = on_mqtt_message
+             mqtt_client = c
+ 
+@@ -528,6 +539,7 @@ def mqtt_worker():
+                 query_all()
+ 
+         except Exception as e:
++            telemetry["connected"] = False
+             print(f"[Bridge] MQTT exception: {e}")
+             shutdown_event.wait(3)
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0036af0a..c986dd0b 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -29,9 +29,13 @@ if (SLIC3R_GUI)
+         endif()
+     endif()
+ 
+-    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    if (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         set (wxWidgets_CONFIG_OPTIONS "--toolkit=gtk${SLIC3R_GTK}")
+-        find_package(wxWidgets 3.3 REQUIRED COMPONENTS base core adv html gl aui net media webview)
++        if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++            find_package(wxWidgets 3.2 REQUIRED COMPONENTS base core adv html gl aui net media webview)
++        else()
++            find_package(wxWidgets 3.3 REQUIRED COMPONENTS base core adv html gl aui net media webview)
++        endif()
+     else ()
+         find_package(wxWidgets 3.3 CONFIG REQUIRED COMPONENTS html adv gl core base webview aui net media)
+     endif ()
+@@ -89,7 +93,44 @@ if (SLIC3R_GUI)
+ 
+ #    list(REMOVE_ITEM wxWidgets_LIBRARIES oleacc)
+ 
+-    find_package(wxInspector REQUIRED)
++    if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++        # wxInspector is not packaged on FreeBSD. Build the pinned upstream
++        # release against the selected system wxWidgets instead of requiring a
++        # locally installed prefix. The patch keeps v1.0.0 compatible with the
++        # wxWidgets 3.2 package.
++        include(FetchContent)
++        find_program(_wxinspector_patch_executable patch REQUIRED)
++        FetchContent_Declare(wxInspector
++            URL https://github.com/Noisyfox/wxInspector/archive/refs/tags/v1.0.0.zip
++            URL_HASH SHA256=0ba163956f2d468b19a91b96c5aba66ee9610843ea41dda628ea44cdafde7db7
++        )
++        FetchContent_MakeAvailable(wxInspector)
++
++        # FetchContent sources reside below this checkout, so `git apply`
++        # would discover OrcaCubic's worktree instead of patching wxInspector.
++        # Verify the source itself and make a failed patch application a
++        # configuration error. The marker makes reconfiguration idempotent.
++        file(STRINGS "${wxInspector_SOURCE_DIR}/src/info.cpp"
++            _wxinspector_compat_marker REGEX "WXINSPECTOR_READ_ONLY_FLAG")
++        if (NOT _wxinspector_compat_marker)
++            execute_process(
++                COMMAND ${_wxinspector_patch_executable} -p1 -V none --batch --forward -i
++                    ${CMAKE_SOURCE_DIR}/deps/wxInspector/0001-wx-3.2-compat.patch
++                WORKING_DIRECTORY "${wxInspector_SOURCE_DIR}"
++                RESULT_VARIABLE _wxinspector_patch_result
++                OUTPUT_VARIABLE _wxinspector_patch_output
++                ERROR_VARIABLE _wxinspector_patch_error
++            )
++            if (NOT _wxinspector_patch_result EQUAL 0)
++                message(FATAL_ERROR
++                    "Could not apply the FreeBSD wxInspector compatibility patch:\n"
++                    "${_wxinspector_patch_output}${_wxinspector_patch_error}")
++            endif ()
++        endif ()
++        add_library(wxInspector::wxInspector ALIAS wxInspector)
++    else ()
++        find_package(wxInspector REQUIRED)
++    endif ()
+     list(APPEND wxWidgets_LIBRARIES "wxInspector::wxInspector")
+ 
+     message(STATUS "wx libs: ${wxWidgets_LIBRARIES}")
+@@ -294,7 +335,7 @@ if (WIN32)
+     endif()
+ 
+ else ()
+-    if (NOT APPLE)
++    if (NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+         set(output_sos_Release "")
+         set(output_sos_Debug "")
+         add_custom_target(OrcaSlicerSosCopy ALL DEPENDS OrcaSlicer)
+@@ -344,11 +385,13 @@ else ()
+         COMMAND ln -sfn "${SLIC3R_RESOURCES_DIR}" "${BIN_RESOURCES_DIR}"
+         COMMENT "Symlinking the resources directory into the build tree"
+         VERBATIM)
+-    add_custom_command(TARGET OrcaSlicer POST_BUILD
+-        COMMAND ${CMAKE_COMMAND} -E rm -rf "${BIN_DIR}/python"
+-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${BIN_DIR}/python"
+-        COMMENT "Copying Python runtime into the build tree"
+-        VERBATIM)
++    if (NOT CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++        add_custom_command(TARGET OrcaSlicer POST_BUILD
++            COMMAND ${CMAKE_COMMAND} -E rm -rf "${BIN_DIR}/python"
++            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_PREFIX_PATH}/libpython" "${BIN_DIR}/python"
++            COMMENT "Copying Python runtime into the build tree"
++            VERBATIM)
++    endif ()
+     # Stage uv next to the binary for the build-tree/.app flows, which never
+     # run install() -- see the layout map above; lookup is bundled_uv_path().
+     if(ORCA_BUNDLED_UV_EXECUTABLE AND EXISTS "${ORCA_BUNDLED_UV_EXECUTABLE}")
+diff --git a/src/libslic3r/CMakeLists.txt b/src/libslic3r/CMakeLists.txt
+index 2880a3cc..c4b97d9a 100644
+--- a/src/libslic3r/CMakeLists.txt
++++ b/src/libslic3r/CMakeLists.txt
+@@ -522,7 +522,13 @@ cmake_policy(SET CMP0011 NEW)
+ # can't reach it; the default opts its Boost lookup into BoostConfig (CMP0167).
+ set(CMAKE_POLICY_DEFAULT_CMP0167 NEW)
+ find_package(CGAL REQUIRED)
+-find_package(OpenCV REQUIRED core)
++if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    # The FreeBSD package exports individual OpenCV component targets instead
++    # of the monolithic opencv_world target built by OrcaSlicer's superbuild.
++    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
++else ()
++    find_package(OpenCV REQUIRED core)
++endif ()
+ find_package(assimp REQUIRED)
+ unset(CMAKE_POLICY_DEFAULT_CMP0167)
+ cmake_policy(POP)
+@@ -575,12 +581,21 @@ target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
+ find_package(JPEG REQUIRED)
+ find_package(Draco REQUIRED)
+ 
++if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    # OCCT 7.9 consolidates the legacy TKXDESTEP/TKSTEP* modules.
++    set(OCCT_STEP_LIBS TKDE TKDESTEP)
++else ()
++    set(OCCT_STEP_LIBS
++        TKXDESTEP
++        TKSTEP
++        TKSTEP209
++        TKSTEPAttr
++        TKSTEPBase
++    )
++endif ()
++
+ set(OCCT_LIBS
+-    TKXDESTEP
+-    TKSTEP
+-    TKSTEP209
+-    TKSTEPAttr
+-    TKSTEPBase
++    ${OCCT_STEP_LIBS}
+     TKXCAF
+     TKXSBase
+     TKVCAF
+@@ -611,7 +626,7 @@ target_link_libraries(libslic3r
+         libigl
+         libnest2d
+         miniz
+-        opencv_world
++        $<$<NOT:$<PLATFORM_ID:FreeBSD>>:opencv_world>
+         assimp::assimp
+     PRIVATE
+         ${CMAKE_DL_LIBS}
+@@ -637,6 +652,10 @@ target_link_libraries(libslic3r
+         OpenSSL::Crypto
+     )
+ 
++if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    target_link_libraries(libslic3r PUBLIC opencv_core opencv_imgcodecs opencv_imgproc)
++endif ()
++
+ if(NOT WIN32)
+     # Link freetype for OCCT dependency (CAD operations need font rendering)
+     target_link_libraries(libslic3r PRIVATE ${FREETYPE_LIBRARIES})
+diff --git a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp b/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
+index 97f8f743..8c1949b9 100644
+--- a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
++++ b/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
+@@ -13,7 +13,11 @@
+ 
+ #include "FuzzySkin.hpp"
+ 
+-#include "libnoise/noise.h"
++#if __has_include(<noise/noise.h>)
++#include <noise/noise.h>
++#else
++#include <libnoise/noise.h>
++#endif
+ 
+ // #define DEBUG_FUZZY
+ 
+diff --git a/src/libslic3r/GCodeSender.cpp b/src/libslic3r/GCodeSender.cpp
+index 275dd61a..4c8fe2dd 100644
+--- a/src/libslic3r/GCodeSender.cpp
++++ b/src/libslic3r/GCodeSender.cpp
+@@ -107,7 +107,7 @@ GCodeSender::connect(std::string devname, unsigned int baud_rate)
+     this->io.post(boost::bind(&GCodeSender::do_read, this));
+     
+     // start reading in the background thread
+-    boost::thread t(boost::bind(&boost::asio::io_service::run, &this->io));
++    boost::thread t(boost::bind(&boost::asio::io_context::run, &this->io));
+     this->background_thread.swap(t);
+     
+     // always send a M105 to check for connection because firmware might be silent on connect
+diff --git a/src/libslic3r/GCodeSender.hpp b/src/libslic3r/GCodeSender.hpp
+index 3a2055e5..5c8eec43 100644
+--- a/src/libslic3r/GCodeSender.hpp
++++ b/src/libslic3r/GCodeSender.hpp
+@@ -35,7 +35,7 @@ class GCodeSender : private boost::noncopyable {
+     void reset();
+     
+     private:
+-    asio::io_service io;
++    asio::io_context io;
+     asio::serial_port serial;
+     boost::thread background_thread;
+     boost::asio::streambuf read_buffer, write_buffer;
+diff --git a/src/libslic3r/Platform.cpp b/src/libslic3r/Platform.cpp
+index d2ca27fa..b2de7af4 100644
+--- a/src/libslic3r/Platform.cpp
++++ b/src/libslic3r/Platform.cpp
+@@ -82,6 +82,10 @@ void detect_platform()
+ 			::fclose(f);
+ 		}
+ 	}
++#elif defined(__FreeBSD__)
++    BOOST_LOG_TRIVIAL(info) << "Platform: FreeBSD";
++    s_platform        = Platform::BSDUnix;
++    s_platform_flavor = PlatformFlavor::FreeBSD;
+ #elif defined(__OpenBSD__)
+     BOOST_LOG_TRIVIAL(info) << "Platform: OpenBSD";
+ 	s_platform 		  = Platform::BSDUnix;
+@@ -113,6 +117,8 @@ std::string platform_os_type()
+     return "macos";
+ #elif defined(__linux__) || defined(__LINUX__)
+     return "linux";
++#elif defined(__FreeBSD__)
++    return "freebsd";
+ #else
+     return "unknown";
+ #endif
+@@ -159,6 +165,7 @@ std::string platform_flavor_to_string(PlatformFlavor pf)
+         case PlatformFlavor::LinuxOnChromium : return "LinuxOnChromium";
+         case PlatformFlavor::WSL             : return "WSL";
+         case PlatformFlavor::WSL2            : return "WSL2";
++        case PlatformFlavor::FreeBSD         : return "FreeBSD";
+         case PlatformFlavor::OpenBSD         : return "OpenBSD";
+         case PlatformFlavor::GenericOSX      : return "GenericOSX";
+         case PlatformFlavor::OSXOnX86        : return "OSXOnX86";
+diff --git a/src/libslic3r/Platform.hpp b/src/libslic3r/Platform.hpp
+index c943235e..a82a8379 100644
+--- a/src/libslic3r/Platform.hpp
++++ b/src/libslic3r/Platform.hpp
+@@ -24,6 +24,7 @@ enum class PlatformFlavor
+     LinuxOnChromium, // For Platform::Linux
+     WSL,             // Microsoft's Windows on Linux (Linux kernel simulated on NTFS kernel)
+     WSL2,            // Microsoft's Windows on Linux, version 2 (virtual machine)
++    FreeBSD,         // For Platform::BSDUnix
+     OpenBSD,         // For Platform::BSDUnix
+     GenericOSX,      // For Platform::OSX
+     OSXOnX86,        // For Apple's on Intel X86 CPU
+diff --git a/src/libslic3r/utils.cpp b/src/libslic3r/utils.cpp
+index 58ec8318..f9260ec1 100644
+--- a/src/libslic3r/utils.cpp
++++ b/src/libslic3r/utils.cpp
+@@ -921,7 +921,7 @@ CopyFileResult copy_file_inner(const std::string& from, const std::string& to, s
+ 	// That may happen when copying on some exotic file system, for example Linux on Chrome.
+ 	copy_file_linux(source, target, ec);
+ #else // __linux__
+-	boost::filesystem::copy_file(source, target, boost::filesystem::copy_option::overwrite_if_exists, ec);
++	boost::filesystem::copy_file(source, target, boost::filesystem::copy_options::overwrite_existing, ec);
+ #endif // __linux__
+ 	if (ec) {
+ 		error_message = ec.message();
+diff --git a/src/slic3r/CMakeLists.txt b/src/slic3r/CMakeLists.txt
+index 1cd8af13..61376e7c 100644
+--- a/src/slic3r/CMakeLists.txt
++++ b/src/slic3r/CMakeLists.txt
+@@ -947,9 +947,9 @@ if (UNIX AND NOT APPLE)
+     find_package(GTK${SLIC3R_GTK} REQUIRED)
+     pkg_check_modules(LIBSECRET REQUIRED libsecret-1)
+     pkg_check_modules(webkit2gtk REQUIRED webkit2gtk-4.1)
+-    if (FLATPAK)
+-        # I don't know why this is needed, but for whatever reason slic3r isn't
+-        # linking to X11 and webkit2gtk. force it.
++    if (FLATPAK OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++        # Static spnav and direct GTK WebView calls require explicit X11 and
++        # WebKitGTK linkage on Flatpak and FreeBSD.
+         find_package(X11 REQUIRED)
+         target_link_libraries(libslic3r_gui ${X11_LIBRARIES} ${webkit2gtk_LIBRARIES})
+     endif()
+diff --git a/src/slic3r/GUI/AMSDryControl.cpp b/src/slic3r/GUI/AMSDryControl.cpp
+index f83eed30..fc6a602c 100644
+--- a/src/slic3r/GUI/AMSDryControl.cpp
++++ b/src/slic3r/GUI/AMSDryControl.cpp
+@@ -314,7 +314,7 @@ wxBoxSizer* AMSDryCtrWin::create_humidity_status_section(wxPanel* parent)
+     m_image_description->SetBackgroundColour(*wxWHITE);
+     desc_sizer->Add(m_image_description, 0, wxALIGN_CENTER_VERTICAL);
+ 
+-    image_sizer->Add(desc_sizer, 0, wxALIGN_CENTER | wxALL, FromDIP(5));
++    image_sizer->Add(desc_sizer, 0, wxALIGN_CENTER_HORIZONTAL | wxALL, FromDIP(5));
+ 
+     return image_sizer;
+ }
+@@ -332,8 +332,8 @@ wxBoxSizer* AMSDryCtrWin::create_description_item(wxPanel* parent, const wxStrin
+     dataLabel->SetFont(Label::Body_14);
+ 
+     item_sizer->AddStretchSpacer();
+-    item_sizer->Add(titleLabel, 0, wxALIGN_CENTER | wxALL, FromDIP(2));
+-    item_sizer->Add(dataLabel, 0, wxALIGN_CENTER | wxALL, FromDIP(2));
++    item_sizer->Add(titleLabel, 0, wxALIGN_CENTER_HORIZONTAL | wxALL, FromDIP(2));
++    item_sizer->Add(dataLabel, 0, wxALIGN_CENTER_HORIZONTAL | wxALL, FromDIP(2));
+     item_sizer->AddStretchSpacer();
+ 
+     return item_sizer;
+@@ -557,7 +557,7 @@ wxBoxSizer* AMSDryCtrWin::create_cannot_dry_panel(wxPanel* parent)
+     description_label->SetForegroundColour(*wxBLACK);
+     description_label->SetFont(Label::Head_16);
+     description_label->Wrap(FromDIP(300));
+-    abnormal_sizer->Add(description_label, 0, wxALIGN_CENTER_VERTICAL, FromDIP(10));
++    abnormal_sizer->Add(description_label, 0, 0, FromDIP(10));
+ 
+     // Add a description label for the abnormal state
+     m_cannot_dry_description_label = new Label(parent, (""));
+@@ -565,7 +565,7 @@ wxBoxSizer* AMSDryCtrWin::create_cannot_dry_panel(wxPanel* parent)
+     m_cannot_dry_description_label->SetFont(Label::Body_14);
+     m_cannot_dry_description_label->Wrap(FromDIP(250)); // Wrap text to fit within panel
+ 
+-    abnormal_sizer->Add(m_cannot_dry_description_label, 0, wxALIGN_CENTER_VERTICAL, FromDIP(10));
++    abnormal_sizer->Add(m_cannot_dry_description_label, 0, 0, FromDIP(10));
+ 
+     // Unload button shown only when ConsumableAtAmsOutlet reason is active
+     m_unload_button = create_button(
+@@ -608,12 +608,12 @@ wxBoxSizer* AMSDryCtrWin::create_drying_error_panel(wxPanel* parent)
+     Label* description_label = new Label(parent, _L("Drying Error"));
+     description_label->SetForegroundColour(*wxRED);
+     description_label->SetFont(Label::Body_14); // Wrap text to fit within panel
+-    err_sizer->Add(description_label, 0, wxALIGN_CENTER_VERTICAL, FromDIP(10));
++    err_sizer->Add(description_label, 0, 0, FromDIP(10));
+ 
+     Label* additional_description_label = new Label(parent, _L("Please check the Assistant for troubleshooting"));
+     additional_description_label->SetForegroundColour(*wxBLACK);
+     additional_description_label->SetFont(Label::Body_14); // Wrap text to fit within panel
+-    err_sizer->Add(additional_description_label, 0, wxALIGN_CENTER_VERTICAL, FromDIP(10));
++    err_sizer->Add(additional_description_label, 0, 0, FromDIP(10));
+ 
+     return err_sizer;
+ }
+@@ -666,7 +666,7 @@ wxBoxSizer* AMSDryCtrWin::create_guide_info_filament(wxPanel* parent)
+ 
+     m_ams_filament_panel = new AMSFilamentPanel(parent, "");
+ 
+-    filament_section->Add(m_ams_filament_panel, 0, wxEXPAND | wxALL | wxALIGN_CENTER_HORIZONTAL, FromDIP(5));
++    filament_section->Add(m_ams_filament_panel, 0, wxEXPAND | wxALL, FromDIP(5));
+ 
+     return filament_section;
+ }
+@@ -709,7 +709,7 @@ wxBoxSizer* AMSDryCtrWin::create_guide_info_section(wxPanel* parent)
+     Label* toggle_description = new Label(parent, _L("Rotate spool when drying"), LB_AUTO_WRAP);
+     toggle_description->SetForegroundColour(*wxBLACK);
+     toggle_description->SetFont(Label::Body_12);
+-    toggle_section->Add(toggle_description, 1, wxALIGN_CENTER_VERTICAL | wxEXPAND, 0);
++    toggle_section->Add(toggle_description, 1, wxEXPAND, 0);
+ 
+     info_section->Add(toggle_section, 0, wxEXPAND | wxALL, FromDIP(5));
+ 
+@@ -960,13 +960,13 @@ wxBoxSizer* AMSDryCtrWin::create_progress_page_sizer(wxPanel* parent)
+     m_progress_title->SetFont(Label::Body_16);
+ 
+     progress_sizer->Add(0, 0, 1, wxEXPAND, 0); // Spacer
+-    progress_sizer->Add(m_progress_title, 0, wxALIGN_CENTER | wxALL, FromDIP(30));
++    progress_sizer->Add(m_progress_title, 0, wxALIGN_CENTER_HORIZONTAL | wxALL, FromDIP(30));
+ 
+     m_progress_gauge = new ProgressBar(parent, wxID_ANY, 100, wxDefaultPosition, wxSize(FromDIP(300), FromDIP(8)));
+     m_progress_gauge->SetValue(0);
+     m_progress_gauge->SetHeight(FromDIP(8));
+ 
+-    progress_sizer->Add(m_progress_gauge, 0, wxALIGN_CENTER | wxALL, FromDIP(10));
++    progress_sizer->Add(m_progress_gauge, 0, wxALIGN_CENTER_HORIZONTAL | wxALL, FromDIP(10));
+     progress_sizer->Add(0, 0, 1, wxEXPAND, 0);
+ 
+     return progress_sizer;
+diff --git a/src/slic3r/GUI/DeviceManager.cpp b/src/slic3r/GUI/DeviceManager.cpp
+index d8487f46..690caee9 100644
+--- a/src/slic3r/GUI/DeviceManager.cpp
++++ b/src/slic3r/GUI/DeviceManager.cpp
+@@ -5833,11 +5833,11 @@ wxString MachineObject::get_nozzle_replace_url() const
+ 
+     const json& link_map = DevPrinterConfigUtil::get_json_from_config(printer_type, "print", "nozzle_replace_wiki");
+     if (link_map.contains(lan_code.ToStdString())) {
+-        return link_map[lan_code.ToStdString()].get<wxString>();
++        return wxString::FromUTF8(link_map[lan_code.ToStdString()].get<std::string>());
+     }
+ 
+     if (link_map.contains("en")){
+-        return link_map["en"].get<wxString>();
++        return wxString::FromUTF8(link_map["en"].get<std::string>());
+     }/*retry with en*/
+ 
+     // Orca: no neutral wiki equivalent for this fallback — return empty so the caller hides the link
+diff --git a/src/slic3r/GUI/DeviceTab/wgtDeviceNozzleRack.cpp b/src/slic3r/GUI/DeviceTab/wgtDeviceNozzleRack.cpp
+index 1e40a711..cac5afc9 100644
+--- a/src/slic3r/GUI/DeviceTab/wgtDeviceNozzleRack.cpp
++++ b/src/slic3r/GUI/DeviceTab/wgtDeviceNozzleRack.cpp
+@@ -150,7 +150,7 @@ public:
+ 
+         wxSizer* title_sizer = new wxBoxSizer(wxHORIZONTAL);
+         title_sizer->AddStretchSpacer();
+-        title_sizer->Add(m_title_label, 0, wxEXPAND | wxALIGN_CENTER | wxTOP | wxBOTTOM, FromDIP(5));
++        title_sizer->Add(m_title_label, 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(5));
+         title_sizer->AddStretchSpacer();
+         SetSizer(title_sizer);
+     };
+@@ -524,16 +524,16 @@ void wgtDeviceNozzleRackPos::CreateGui()
+     m_btn_rowup->Bind(wxEVT_ENTER_WINDOW, [this](auto&) { SetCursor(wxCURSOR_HAND); });
+     m_btn_rowup->Bind(wxEVT_LEAVE_WINDOW, [this](auto&) { SetCursor(wxCURSOR_ARROW); });
+     m_btn_rowup->Bind(wxEVT_BUTTON, &wgtDeviceNozzleRackPos::OnMoveRackUp, this);
+-    rowa_sizer->Add(m_btn_rowup, 0, wxALIGN_CENTER | wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
++    rowa_sizer->Add(m_btn_rowup, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
+ 
+     m_label_rowup_status = new Label(m_rowup_panel);
+     m_label_rowup_status->SetFont(Label::Body_12);
+     m_label_rowup_status->Show(false);
+-    rowa_sizer->Add(m_label_rowup_status, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT, FromDIP(10));
++    rowa_sizer->Add(m_label_rowup_status, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(10));
+ 
+     m_label_rowup = new Label(m_rowup_panel);
+     m_label_rowup->SetFont(Label::Body_14);
+-    rowa_sizer->Add(m_label_rowup, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT, FromDIP(10));
++    rowa_sizer->Add(m_label_rowup, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(10));
+     rowa_sizer->AddStretchSpacer();
+ 
+     m_rowup_panel->SetSizer(rowa_sizer);
+@@ -556,16 +556,16 @@ void wgtDeviceNozzleRackPos::CreateGui()
+     m_btn_rowbottom_up->Bind(wxEVT_BUTTON, &wgtDeviceNozzleRackPos::OnMoveRackDown, this);
+     m_btn_rowbottom_up->Bind(wxEVT_ENTER_WINDOW, [this](auto&) { SetCursor(wxCURSOR_HAND); });
+     m_btn_rowbottom_up->Bind(wxEVT_LEAVE_WINDOW, [this](auto&) { SetCursor(wxCURSOR_ARROW); });
+-    rowb_sizer->Add(m_btn_rowbottom_up, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT, FromDIP(10));
++    rowb_sizer->Add(m_btn_rowbottom_up, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(10));
+ 
+     m_label_rowbottom_status = new Label(m_rowbottom_panel);
+     m_label_rowbottom_status->SetFont(Label::Body_12);
+     m_label_rowbottom_status->Show(false);
+-    rowb_sizer->Add(m_label_rowbottom_status, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT, FromDIP(10));
++    rowb_sizer->Add(m_label_rowbottom_status, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(10));
+ 
+     m_label_rowbottom = new Label(m_rowbottom_panel);
+     m_label_rowbottom->SetFont(Label::Body_14);
+-    rowb_sizer->Add(m_label_rowbottom, 0, wxALIGN_CENTER | wxLEFT | wxRIGHT, FromDIP(10));
++    rowb_sizer->Add(m_label_rowbottom, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(10));
+     rowb_sizer->AddStretchSpacer();
+ 
+     m_rowbottom_panel->SetSizer(rowb_sizer);
+@@ -577,9 +577,9 @@ void wgtDeviceNozzleRackPos::CreateGui()
+ 
+     // main sizer
+     wxBoxSizer* main_sizer = new wxBoxSizer(wxVERTICAL);
+-    main_sizer->Add(m_rowup_panel, 1, wxALIGN_TOP | wxEXPAND | wxALIGN_CENTER);
+-    main_sizer->Add(m_btn_homing, 0, wxALIGN_CENTER | wxTOP | wxBOTTOM, FromDIP(10));
+-    main_sizer->Add(m_rowbottom_panel, 1, wxALIGN_BOTTOM | wxEXPAND | wxALIGN_CENTER);
++    main_sizer->Add(m_rowup_panel, 1, wxEXPAND);
++    main_sizer->Add(m_btn_homing, 0, wxALIGN_CENTER_HORIZONTAL | wxTOP | wxBOTTOM, FromDIP(10));
++    main_sizer->Add(m_rowbottom_panel, 1, wxEXPAND);
+     SetSizer(main_sizer);
+ 
+     SetMinSize(WX_DIP_SIZE(85, -1));
+diff --git a/src/slic3r/GUI/EncodedFilament.cpp b/src/slic3r/GUI/EncodedFilament.cpp
+index f9054e7f..7092c2df 100644
+--- a/src/slic3r/GUI/EncodedFilament.cpp
++++ b/src/slic3r/GUI/EncodedFilament.cpp
+@@ -73,17 +73,17 @@ void FilamentColorCodeQuery::LoadFromLocal()
+             const json& json_data = json_content["data"];
+             for (const auto& json_data_item : json_data)
+             {
+-                const wxString& fila_id = json_data_item.contains("fila_id") ? json_data_item["fila_id"].get<wxString>() : wxString();
+-                const wxString& fila_type = json_data_item.contains("fila_type") ? json_data_item["fila_type"].get<wxString>() : wxString();
+-                const wxString& fila_color_code = json_data_item.contains("fila_color_code") ? json_data_item["fila_color_code"].get<wxString>() : wxString();
++                const wxString& fila_id = json_data_item.contains("fila_id") ? wxString::FromUTF8(json_data_item["fila_id"].get<std::string>()) : wxString();
++                const wxString& fila_type = json_data_item.contains("fila_type") ? wxString::FromUTF8(json_data_item["fila_type"].get<std::string>()) : wxString();
++                const wxString& fila_color_code = json_data_item.contains("fila_color_code") ? wxString::FromUTF8(json_data_item["fila_color_code"].get<std::string>()) : wxString();
+ 
+                 FilamentColor fila_color;
+                 if (json_data_item.contains("fila_color"))
+                 {
+-                    const auto& fila_color_strs = json_data_item["fila_color"].get<std::vector<wxString>>();
++                    const auto& fila_color_strs = json_data_item["fila_color"].get<std::vector<std::string>>();
+                     for (const auto& color_str : fila_color_strs) {
+                         if (color_str.size() > 3) /* Skip the value like "#0"*/{
+-                            fila_color.m_colors.emplace(wxColour(color_str));
++                            fila_color.m_colors.emplace(wxColour(wxString::FromUTF8(color_str)));
+                         }
+                     }
+                 }
+@@ -214,4 +214,4 @@ void FilamentColorCodes::Debug(const char* prefix)
+ 
+ 
+ 
+-} // namespace Slic3r
+\ No newline at end of file
++} // namespace Slic3r
+diff --git a/src/slic3r/GUI/Field.cpp b/src/slic3r/GUI/Field.cpp
+index 142cf705..5e0143c3 100644
+--- a/src/slic3r/GUI/Field.cpp
++++ b/src/slic3r/GUI/Field.cpp
+@@ -2774,7 +2774,7 @@ void ColourPicker::sys_color_changed()
+ }
+ 
+ void ColourPicker::on_button_click(wxCommandEvent &event) {
+-#if !defined(__linux__) && !defined(__LINUX__)
++#if wxCHECK_VERSION(3, 3, 0)
+     if (m_clrData) {
+         std::vector<std::string> colors = wxGetApp().app_config->get_custom_color_from_config();
+         for (int i = 0; i < colors.size(); i++) {
+@@ -2787,7 +2787,7 @@ void ColourPicker::on_button_click(wxCommandEvent &event) {
+ 
+ void ColourPicker::convert_to_picker_widget(wxColourPickerCtrl *widget)
+ {
+-#if !defined(__linux__) && !defined(__LINUX__)
++#if wxCHECK_VERSION(3, 3, 0)
+     m_picker_widget = dynamic_cast<wxColourPickerWidget*>(widget->GetPickerCtrl());
+     if (m_picker_widget) {
+         m_picker_widget->Bind(wxEVT_BUTTON, &ColourPicker::on_button_click, this);
+@@ -2797,7 +2797,7 @@ void ColourPicker::convert_to_picker_widget(wxColourPickerCtrl *widget)
+ }
+ 
+ void ColourPicker::save_colors_to_config() {
+-#if !defined(__linux__) && !defined(__LINUX__)
++#if wxCHECK_VERSION(3, 3, 0)
+     if (m_clrData) {
+         std::vector<std::string> colors;
+         if (colors.size() != CUSTOM_COLOR_COUNT) {
+diff --git a/src/slic3r/GUI/GUI_App.cpp b/src/slic3r/GUI/GUI_App.cpp
+index 16a713b8..212655af 100644
+--- a/src/slic3r/GUI/GUI_App.cpp
++++ b/src/slic3r/GUI/GUI_App.cpp
+@@ -4171,7 +4171,7 @@ void GUI_App::init_label_colours()
+     m_color_label_modified = is_dark_mode ? wxColour("#F1754E") : wxColour("#F1754E");
+     m_color_label_sys      = is_dark_mode ? wxColour("#B2B3B5") : wxColour("#363636");
+ 
+-#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
++#if defined(_WIN32) || defined(__WXGTK__) || defined(__APPLE__)
+     m_color_label_default           = is_dark_mode ? wxColour(250, 250, 250) : m_color_label_sys; // wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+     m_color_highlight_label_default = is_dark_mode ? wxColour(230, 230, 230): wxSystemSettings::GetColour(/*wxSYS_COLOUR_HIGHLIGHTTEXT*/wxSYS_COLOUR_WINDOWTEXT);
+     m_color_highlight_default       = is_dark_mode ? wxColour("#36363B") : wxColour("#F1F1F1"); // ORCA row highlighting
+@@ -5342,7 +5342,7 @@ void GUI_App::handle_script_message(std::string msg, const std::string& provider
+     try {
+         json j = json::parse(msg);
+         if (j.contains("command")) {
+-            wxString cmd = j["command"];
++            wxString cmd = wxString::FromUTF8(j["command"].get<std::string>());
+             if (cmd == "user_login") {
+                 if (m_agent) {
+                     m_agent->change_user(j.dump(), provider);
+diff --git a/src/slic3r/GUI/Gizmos/GLGizmoEmboss.cpp b/src/slic3r/GUI/Gizmos/GLGizmoEmboss.cpp
+index ecf465af..7a419a11 100644
+--- a/src/slic3r/GUI/Gizmos/GLGizmoEmboss.cpp
++++ b/src/slic3r/GUI/Gizmos/GLGizmoEmboss.cpp
+@@ -1046,7 +1046,7 @@ EmbossStyles GLGizmoEmboss::create_default_styles()
+     } else {
+         // On current OS is not installed any correct TTF font
+         // use font packed with Slic3r
+-        std::string font_path = Slic3r::resources_dir() + "/fonts/NotoSans-Regular.ttf";
++        std::string font_path = Slic3r::resources_dir() + "/fonts/NotoSansKR-Regular.ttf";
+         styles.push_back(EmbossStyle{_u8L("Default font"), font_path, EmbossStyle::Type::file_path});
+     }
+     return styles;
+diff --git a/src/slic3r/GUI/HttpServer.hpp b/src/slic3r/GUI/HttpServer.hpp
+index 4c0b9296..09760923 100644
+--- a/src/slic3r/GUI/HttpServer.hpp
++++ b/src/slic3r/GUI/HttpServer.hpp
+@@ -130,7 +130,7 @@ private:
+     {
+     public:
+         HttpServer&                        server;
+-        boost::asio::io_service            io_service;
++        boost::asio::io_context            io_service;
+         boost::asio::ip::tcp::acceptor     acceptor;
+         std::set<std::shared_ptr<session>> sessions;
+ 
+diff --git a/src/slic3r/GUI/InstanceCheck.cpp b/src/slic3r/GUI/InstanceCheck.cpp
+index bc68a3f7..7828642d 100644
+--- a/src/slic3r/GUI/InstanceCheck.cpp
++++ b/src/slic3r/GUI/InstanceCheck.cpp
+@@ -290,6 +290,14 @@ namespace instance_check_internal
+ 		return false;
+ 	}
+ 
++#else
++
++	static bool send_message(const std::string &, const std::string &)
++	{
++		BOOST_LOG_TRIVIAL(warning) << "Single-instance command forwarding is not available on this platform.";
++		return false;
++	}
++
+ #endif //__APPLE__/__linux__
+ } //namespace instance_check_internal
+ 
+diff --git a/src/slic3r/GUI/MainFrame.cpp b/src/slic3r/GUI/MainFrame.cpp
+index 675bc8da..51960c5d 100644
+--- a/src/slic3r/GUI/MainFrame.cpp
++++ b/src/slic3r/GUI/MainFrame.cpp
+@@ -119,12 +119,14 @@ public:
+     static constexpr int BORDER_PX = 5;
+ 
+     ResizeEdgePanel(MainFrame* frame, Edge edge)
+-        : wxPanel(frame, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+-                  wxBORDER_NONE)
+-        , m_frame(frame)
++        : m_frame(frame)
+         , m_edge(edge)
+     {
++        // wxBG_STYLE_TRANSPARENT must be selected before the native GTK
++        // window is created. The wxPanel(parent, ...) constructor creates it
++        // immediately, so use the two-phase wxWidgets construction here.
+         SetBackgroundStyle(wxBG_STYLE_TRANSPARENT);
++        Create(frame, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+         Bind(wxEVT_MOTION,       &ResizeEdgePanel::OnCursorUpdate, this);
+         Bind(wxEVT_ENTER_WINDOW, &ResizeEdgePanel::OnCursorUpdate, this);
+         Bind(wxEVT_LEFT_DOWN,    &ResizeEdgePanel::OnLeftDown,     this);
+diff --git a/src/slic3r/GUI/MediaPlayCtrl.cpp b/src/slic3r/GUI/MediaPlayCtrl.cpp
+index 71fbcb05..a9c47910 100644
+--- a/src/slic3r/GUI/MediaPlayCtrl.cpp
++++ b/src/slic3r/GUI/MediaPlayCtrl.cpp
+@@ -15,9 +15,8 @@
+ #include <boost/nowide/cstdio.hpp>
+ #include <boost/nowide/utf8_codecvt.hpp>
+ #undef pid_t
+-#include <boost/process.hpp>
++#include "libslic3r/BoostProcess.hpp"
+ #ifdef __WIN32__
+-#include <boost/process/windows.hpp>
+ #else
+ #include <sys/ipc.h>
+ #include <sys/shm.h>
+diff --git a/src/slic3r/GUI/ModelMall.cpp b/src/slic3r/GUI/ModelMall.cpp
+index 3de5da46..cba19d22 100644
+--- a/src/slic3r/GUI/ModelMall.cpp
++++ b/src/slic3r/GUI/ModelMall.cpp
+@@ -124,7 +124,7 @@ namespace GUI {
+             wxString strInput = evt.GetString();
+             json     j = json::parse(strInput.utf8_string());
+ 
+-            wxString strCmd = j["command"];
++            wxString strCmd = wxString::FromUTF8(j["command"].get<std::string>());
+ 
+             if(strCmd == "request_close_publish_window") {
+                 this->Hide();
+diff --git a/src/slic3r/GUI/MsgDialog.cpp b/src/slic3r/GUI/MsgDialog.cpp
+index 7f1effd1..4118088f 100644
+--- a/src/slic3r/GUI/MsgDialog.cpp
++++ b/src/slic3r/GUI/MsgDialog.cpp
+@@ -194,9 +194,10 @@ Button* MsgDialog::add_button(wxWindowID btn_id, bool set_focus /*= false*/, con
+     bd->button = btn;
+     //bd->type   = type;
+ 
+-    mb->id        = wxString::Format("%d", m_buttons.size());
++    const wxString button_id = wxString::Format("%zu", m_buttons.size());
++    mb->id        = button_id;
+     mb->buttondata = bd;
+-    m_buttons[ wxString::Format("%d", m_buttons.size())] = mb;
++    m_buttons[button_id] = mb;
+     return btn;
+ };
+ 
+diff --git a/src/slic3r/GUI/Plater.cpp b/src/slic3r/GUI/Plater.cpp
+index acc0b6f4..5cfe04be 100644
+--- a/src/slic3r/GUI/Plater.cpp
++++ b/src/slic3r/GUI/Plater.cpp
+@@ -841,7 +841,7 @@ void Sidebar::priv::layout_printer(bool isBBL, bool isDual)
+             hsizer->Add(image_printer, 0, wxLEFT  | wxALIGN_LEFT  | wxALIGN_CENTER_VERTICAL, FromDIP(10));
+             hsizer->Add(combo_printer, 1, wxALIGN_CENTER_VERTICAL | wxALL, FromDIP(2)); // 1 already triggers wxEXPAND
+             hsizer->AddSpacer(FromDIP(2));
+-            hsizer->Add(btn_edit_printer, 0, wxRIGHT | wxALIGN_RIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(SidebarProps::IconSpacing()));
++            hsizer->Add(btn_edit_printer, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(SidebarProps::IconSpacing()));
+             //hsizer->Add(btn_connect_printer, 0, wxRIGHT | wxALIGN_RIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(SidebarProps::IconSpacing()));
+             panel_printer_preset->SetSizer(hsizer);
+         //} else {
+diff --git a/src/slic3r/GUI/PostProcessor.cpp b/src/slic3r/GUI/PostProcessor.cpp
+index cd8592c8..7c4b0709 100644
+--- a/src/slic3r/GUI/PostProcessor.cpp
++++ b/src/slic3r/GUI/PostProcessor.cpp
+@@ -165,7 +165,7 @@ static int run_script(const std::string& script, const std::string& gcode, std::
+ // POSIX
+ 
+ #include <cstdlib> // getenv()
+-#include <boost/process.hpp>
++#include "libslic3r/BoostProcess.hpp"
+ 
+ namespace process = boost::process;
+ 
+diff --git a/src/slic3r/GUI/Preferences.cpp b/src/slic3r/GUI/Preferences.cpp
+index 355c4a26..b67df4da 100644
+--- a/src/slic3r/GUI/Preferences.cpp
++++ b/src/slic3r/GUI/Preferences.cpp
+@@ -1610,7 +1610,7 @@ void PreferencesDialog::create_items()
+     //// GENERAL TAB 
+     /////////////////////////////////////
+     m_pref_tabs->AppendItem(_L("General"));
+-    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
++    f_sizers.push_back(new wxFlexGridSizer(0, 1, v_gap, 0));
+     g_sizer = f_sizers.back();
+     g_sizer->AddGrowableCol(0, 1);
+ 
+@@ -1770,7 +1770,7 @@ void PreferencesDialog::create_items()
+     //// CONTROL TAB
+     /////////////////////////////////////
+     m_pref_tabs->AppendItem(_L("Control"));
+-    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
++    f_sizers.push_back(new wxFlexGridSizer(0, 1, v_gap, 0));
+     g_sizer = f_sizers.back();
+     g_sizer->AddGrowableCol(0, 1);
+ 
+@@ -1849,7 +1849,7 @@ void PreferencesDialog::create_items()
+     //// GRAPHICS TAB
+     /////////////////////////////////////
+     m_pref_tabs->AppendItem(_L("Graphics"));
+-    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
++    f_sizers.push_back(new wxFlexGridSizer(0, 1, v_gap, 0));
+     g_sizer = f_sizers.back();
+     g_sizer->AddGrowableCol(0, 1);
+ 
+@@ -1974,7 +1974,7 @@ void PreferencesDialog::create_items()
+     //// ONLINE TAB
+     /////////////////////////////////////
+     m_pref_tabs->AppendItem(_L("Online"));
+-    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
++    f_sizers.push_back(new wxFlexGridSizer(0, 1, v_gap, 0));
+     g_sizer = f_sizers.back();
+     g_sizer->AddGrowableCol(0, 1);
+ 
+@@ -2052,7 +2052,7 @@ void PreferencesDialog::create_items()
+     // Show a minimal page that sends the user to Windows' Default Apps settings instead.
+     if (is_running_in_msix()) {
+         m_pref_tabs->AppendItem(_L("Associate"));
+-        f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
++        f_sizers.push_back(new wxFlexGridSizer(0, 1, v_gap, 0));
+         g_sizer = f_sizers.back();
+         g_sizer->AddGrowableCol(0, 1);
+ 
+@@ -2068,7 +2068,7 @@ void PreferencesDialog::create_items()
+         sizer_page->Add(g_sizer, 0, wxEXPAND);
+     } else {
+     m_pref_tabs->AppendItem(_L("Associate"));
+-    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
++    f_sizers.push_back(new wxFlexGridSizer(0, 1, v_gap, 0));
+     g_sizer = f_sizers.back();
+     g_sizer->AddGrowableCol(0, 1);
+ 
+@@ -2108,7 +2108,7 @@ void PreferencesDialog::create_items()
+     //// DEVELOPER TAB
+     /////////////////////////////////////
+     m_pref_tabs->AppendItem(_L("Developer"));
+-    f_sizers.push_back(new wxFlexGridSizer(1, 1, v_gap, 0));
++    f_sizers.push_back(new wxFlexGridSizer(0, 1, v_gap, 0));
+     g_sizer = f_sizers.back();
+     g_sizer->AddGrowableCol(0, 1);
+ 
+diff --git a/src/slic3r/GUI/PrinterCloudAuthDialog.cpp b/src/slic3r/GUI/PrinterCloudAuthDialog.cpp
+index e44a712a..59a250d5 100644
+--- a/src/slic3r/GUI/PrinterCloudAuthDialog.cpp
++++ b/src/slic3r/GUI/PrinterCloudAuthDialog.cpp
+@@ -88,7 +88,7 @@ void PrinterCloudAuthDialog::OnScriptMessage(wxWebViewEvent& evt)
+     wxString str_input = evt.GetString();
+     try {
+         json     j      = json::parse(into_u8(str_input));
+-        wxString strCmd = j["command"];
++        wxString strCmd = wxString::FromUTF8(j["command"].get<std::string>());
+         if (strCmd == "login_token") {
+             auto token = j["data"]["token"];
+             m_apikey = token;
+@@ -101,4 +101,4 @@ void PrinterCloudAuthDialog::OnScriptMessage(wxWebViewEvent& evt)
+ }
+ 
+ }
+-} // namespace Slic3r::GUI
+\ No newline at end of file
++} // namespace Slic3r::GUI
+diff --git a/src/slic3r/GUI/ProcessRunner.cpp b/src/slic3r/GUI/ProcessRunner.cpp
+index 77b296fc..d54f37c5 100644
+--- a/src/slic3r/GUI/ProcessRunner.cpp
++++ b/src/slic3r/GUI/ProcessRunner.cpp
+@@ -1,10 +1,6 @@
+ #include "ProcessRunner.hpp"
+ 
+-#include <boost/process/env.hpp>
+-#include <boost/process.hpp>
+-#ifdef _WIN32
+-#include <boost/process/windows.hpp>
+-#endif
++#include "libslic3r/BoostProcess.hpp"
+ 
+ namespace Slic3r { namespace GUI {
+ 
+diff --git a/src/slic3r/GUI/ProcessRunner.hpp b/src/slic3r/GUI/ProcessRunner.hpp
+index e07ec1af..97cf0a89 100644
+--- a/src/slic3r/GUI/ProcessRunner.hpp
++++ b/src/slic3r/GUI/ProcessRunner.hpp
+@@ -12,7 +12,7 @@
+ #include <vector>
+ #include <functional>
+ 
+-#include <boost/process.hpp>
++#include "libslic3r/BoostProcess.hpp"
+ 
+ namespace Slic3r { namespace GUI {
+ 
+diff --git a/src/slic3r/GUI/Project.cpp b/src/slic3r/GUI/Project.cpp
+index 6d1eb0e1..c18b7549 100644
+--- a/src/slic3r/GUI/Project.cpp
++++ b/src/slic3r/GUI/Project.cpp
+@@ -283,10 +283,10 @@ void ProjectPanel::OnScriptMessage(wxWebViewEvent& evt)
+         wxString strInput = evt.GetString();
+         json     j = json::parse(strInput.utf8_string());
+ 
+-        wxString strCmd = j["command"];
++        wxString strCmd = wxString::FromUTF8(j["command"].get<std::string>());
+ 
+         if (strCmd == "open_3mf_accessory") {
+-            wxString accessory_path =  j["accessory_path"];
++            wxString accessory_path = wxString::FromUTF8(j["accessory_path"].get<std::string>());
+ 
+             if (!accessory_path.empty()) {
+                 std::string decode_path = wxGetApp().url_decode(accessory_path.ToStdString());
+diff --git a/src/slic3r/GUI/ReleaseNote.cpp b/src/slic3r/GUI/ReleaseNote.cpp
+index 029310fa..56925cd2 100644
+--- a/src/slic3r/GUI/ReleaseNote.cpp
++++ b/src/slic3r/GUI/ReleaseNote.cpp
+@@ -350,8 +350,8 @@ UpdateVersionDialog::UpdateVersionDialog(wxWindow *parent)
+ 
+     //sizer_button->Add(m_remind_choice, 0, wxALL | wxEXPAND, FromDIP(5));
+ 
+-    sizer_button->Add(m_cb_stable_only     , 0, wxALIGN_CENTER);
+-    sizer_button->Add(stable_only_label    , 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
++    sizer_button->Add(m_cb_stable_only     , 0, wxALIGN_CENTER_VERTICAL);
++    sizer_button->Add(stable_only_label    , 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+     sizer_button->AddStretchSpacer();
+     sizer_button->Add(m_button_download    , 0, wxLEFT, FromDIP(10));
+     sizer_button->Add(m_button_skip_version, 0, wxLEFT, FromDIP(10));
+@@ -363,7 +363,7 @@ UpdateVersionDialog::UpdateVersionDialog(wxWindow *parent)
+     m_sizer_desc->AddStretchSpacer();
+ 
+     m_sizer_top->Add(m_brand     , 0, wxRIGHT  | wxALIGN_CENTER_VERTICAL, FromDIP(15));
+-    m_sizer_top->Add(m_sizer_desc, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
++    m_sizer_top->Add(m_sizer_desc, 1, wxEXPAND);
+ 
+     m_sizer_main->Add(m_line_top               , 0, wxEXPAND);
+     m_sizer_main->Add(m_sizer_top              , 0, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, FromDIP(15));
+diff --git a/src/slic3r/GUI/RemovableDriveManager.cpp b/src/slic3r/GUI/RemovableDriveManager.cpp
+index 83ec4695..0974675a 100644
+--- a/src/slic3r/GUI/RemovableDriveManager.cpp
++++ b/src/slic3r/GUI/RemovableDriveManager.cpp
+@@ -22,7 +22,7 @@
+ #include <pwd.h>
+ #include <boost/filesystem.hpp>
+ #include <boost/system/error_code.hpp>
+-#include <boost/process.hpp>
++#include "libslic3r/BoostProcess.hpp"
+ #endif
+ 
+ namespace Slic3r {
+diff --git a/src/slic3r/GUI/StatusPanel.cpp b/src/slic3r/GUI/StatusPanel.cpp
+index f7bd41fe..464fb2ea 100644
+--- a/src/slic3r/GUI/StatusPanel.cpp
++++ b/src/slic3r/GUI/StatusPanel.cpp
+@@ -786,7 +786,9 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
+ 
+     printingstage_horizontal_sizer->Add(m_printing_stage_value, 0, wxALIGN_LEFT | wxALIGN_CENTER_VERTICAL, 0);
+     printingstage_horizontal_sizer->Add(m_question_button, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+-    printingstage_vertical_sizer->Add(printingstage_horizontal_sizer, 0, wxALIGN_CENTER_VERTICAL, 0);
++    // A vertical sizer only accepts horizontal alignment flags. The child is
++    // already vertically positioned by the sizer, so no alignment is needed.
++    printingstage_vertical_sizer->Add(printingstage_horizontal_sizer, 0, 0, 0);
+     printingstage_vertical_sizer->Add(m_printing_stage_underline, 0, wxEXPAND, 0);
+     m_printing_stage_panel->SetSizer(printingstage_vertical_sizer);
+ 
+diff --git a/src/slic3r/GUI/WebDownPluginDlg.cpp b/src/slic3r/GUI/WebDownPluginDlg.cpp
+index dca17110..16150357 100644
+--- a/src/slic3r/GUI/WebDownPluginDlg.cpp
++++ b/src/slic3r/GUI/WebDownPluginDlg.cpp
+@@ -201,7 +201,7 @@ void DownPluginFrame::OnScriptMessage(wxWebViewEvent &evt)
+         wxString strInput = evt.GetString();
+         json     j        = json::parse(strInput.utf8_string());
+ 
+-        wxString strCmd = j["command"];
++        wxString strCmd = wxString::FromUTF8(j["command"].get<std::string>());
+ 
+         if (strCmd == "Begin_Download_network_plugin") {
+             wxGetApp().CallAfter([this] { DownloadPlugin(); });
+diff --git a/src/slic3r/GUI/WebGuideDialog.cpp b/src/slic3r/GUI/WebGuideDialog.cpp
+index ae259f23..e7e12941 100644
+--- a/src/slic3r/GUI/WebGuideDialog.cpp
++++ b/src/slic3r/GUI/WebGuideDialog.cpp
+@@ -434,14 +434,14 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
+         BOOST_LOG_TRIVIAL(trace) << "GuideFrame::OnScriptMessage;OnRecv:" << strInput.c_str();
+         json     j        = json::parse(strInput.utf8_string());
+ 
+-        wxString strCmd = j["command"];
++        wxString strCmd = wxString::FromUTF8(j["command"].get<std::string>());
+         BOOST_LOG_TRIVIAL(trace) << "GuideFrame::OnScriptMessage;Command:" << strCmd;
+ 
+         if (strCmd == "close_page") {
+             this->EndModal(wxID_CANCEL);
+         }
+         if (strCmd == "user_clause") {
+-            wxString strAction = j["data"]["action"];
++            wxString strAction = wxString::FromUTF8(j["data"]["action"].get<std::string>());
+ 
+             if (strAction == "refuse") {
+                 // CloseTheApp
+@@ -450,7 +450,7 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
+                 m_MainPtr->mainframe->Close(); // Refuse Clause, App quit immediately
+             }
+         } else if (strCmd == "user_private_choice") {
+-            wxString strAction = j["data"]["action"];
++            wxString strAction = wxString::FromUTF8(j["data"]["action"].get<std::string>());
+ 
+             if (strAction == "agree") {
+                 PrivacyUse = true;
+@@ -493,8 +493,8 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
+                 for (auto it = MSelected.begin(); it != MSelected.end(); ++it) {
+                     json OneSelect = it.value();
+ 
+-                    wxString s1 = TmpModel["model"];
+-                    wxString s2 = OneSelect["model"];
++                    wxString s1 = wxString::FromUTF8(TmpModel["model"].get<std::string>());
++                    wxString s2 = wxString::FromUTF8(OneSelect["model"].get<std::string>());
+                     if (s1.compare(s2) == 0) {
+                         m_ProfileJson["model"][m]["nozzle_selected"] = m_ProfileJson["model"][m]["nozzle_diameter"];
+ 
+@@ -609,7 +609,7 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
+                 InstallNetplugin = false;
+         }
+         else if (strCmd == "save_stealth_mode") {
+-            wxString strAction = j["data"]["action"];
++            wxString strAction = wxString::FromUTF8(j["data"]["action"].get<std::string>());
+ 
+             if (strAction == "yes") {
+                 StealthMode = true;
+diff --git a/src/slic3r/GUI/WebUserLoginDialog.cpp b/src/slic3r/GUI/WebUserLoginDialog.cpp
+index 829e7ef1..1786ae62 100644
+--- a/src/slic3r/GUI/WebUserLoginDialog.cpp
++++ b/src/slic3r/GUI/WebUserLoginDialog.cpp
+@@ -48,7 +48,7 @@ namespace {
+ int reserve_loopback_port()
+ {
+     try {
+-        boost::asio::io_service       io_service;
++        boost::asio::io_context       io_service;
+         boost::asio::ip::tcp::acceptor acceptor(io_service, {boost::asio::ip::tcp::v4(), 0});
+         return static_cast<int>(acceptor.local_endpoint().port());
+     } catch (...) {
+@@ -317,7 +317,7 @@ void ZUserLogin::OnScriptMessage(wxWebViewEvent &evt)
+ 
+     try {
+         json j = json::parse(into_u8(str_input));
+-        wxString strCmd = j["command"];
++        wxString strCmd = wxString::FromUTF8(j["command"].get<std::string>());
+         
+         if (m_cloud_agent && strCmd == "get_login_cmd") {
+             // Return login config (backend_url, apikey, pkce)
+diff --git a/src/slic3r/GUI/Widgets/Button.cpp b/src/slic3r/GUI/Widgets/Button.cpp
+index 5a5bd894..6a15d03e 100644
+--- a/src/slic3r/GUI/Widgets/Button.cpp
++++ b/src/slic3r/GUI/Widgets/Button.cpp
+@@ -503,7 +503,11 @@ void Button::OnParentMotion(wxMouseEvent& event)
+     {
+         if (!tipWindow)
+         {
++#if wxCHECK_VERSION(3, 3, 0)
+             tipWindow = wxTipWindow::New(this, tip);
++#else
++            tipWindow = new wxTipWindow(this, tip, 100, &tipWindow);
++#endif
+             if (!tipWindow) return event.Skip();
+             tipWindow->Enable(false);
+         }
+diff --git a/src/slic3r/GUI/Widgets/Button.hpp b/src/slic3r/GUI/Widgets/Button.hpp
+index 2991edd4..42c50a77 100644
+--- a/src/slic3r/GUI/Widgets/Button.hpp
++++ b/src/slic3r/GUI/Widgets/Button.hpp
+@@ -30,7 +30,11 @@ enum class ButtonType{
+ 
+ class Button : public StaticBox
+ {
++#if wxCHECK_VERSION(3, 3, 0)
+     wxTipWindow::Ref tipWindow;
++#else
++    wxTipWindow* tipWindow = nullptr;
++#endif
+     wxRect textSize;
+     wxSize minSize; // set by outer
+     wxSize paddingSize;
+diff --git a/src/slic3r/GUI/Widgets/SwitchButton.cpp b/src/slic3r/GUI/Widgets/SwitchButton.cpp
+index c391ddd0..3327e554 100644
+--- a/src/slic3r/GUI/Widgets/SwitchButton.cpp
++++ b/src/slic3r/GUI/Widgets/SwitchButton.cpp
+@@ -652,7 +652,7 @@ int MultiSwitchButton::AppendOption(const wxString &option, void *clientData)
+     btn->SetClientData(clientData);
+ 
+     btns.push_back(btn);
+-    sizer->Add(btn, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL);
++    sizer->Add(btn, 1, wxEXPAND);
+ 
+     wxSize text_size = btn->GetTextExtent(option);
+     btn->SetMinSize(wxSize(text_size.x + m_button_padding.x * 2 + 6, -1));
+diff --git a/src/slic3r/GUI/Widgets/WebView.cpp b/src/slic3r/GUI/Widgets/WebView.cpp
+index e281d974..18940c2b 100644
+--- a/src/slic3r/GUI/Widgets/WebView.cpp
++++ b/src/slic3r/GUI/Widgets/WebView.cpp
+@@ -20,7 +20,7 @@
+ #include <WebView2.h>
+ #include <Shellapi.h>
+ #include <slic3r/Utils/Http.hpp>
+-#elif defined __linux__
++#elif defined(__WXGTK__)
+ #include <gtk/gtk.h>
+ #define WEBKIT_API
+ struct WebKitWebView;
+diff --git a/src/slic3r/Utils/AnycubicLink.cpp b/src/slic3r/Utils/AnycubicLink.cpp
+index 5e2a8e21..b9d77710 100644
+--- a/src/slic3r/Utils/AnycubicLink.cpp
++++ b/src/slic3r/Utils/AnycubicLink.cpp
+@@ -7,6 +7,12 @@
+ #include <random>
+ #include <sstream>
+ #include <thread>
++#ifndef _WIN32
++#include <cerrno>
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
+ #include <boost/format.hpp>
+ #include <boost/log/trivial.hpp>
+ #include <boost/filesystem.hpp>
+@@ -16,10 +22,7 @@
+ #include <boost/uuid/uuid_generators.hpp>
+ #include <boost/uuid/uuid_io.hpp>
+ #include <boost/asio.hpp>
+-#include <boost/process.hpp>
+-#ifdef _WIN32
+-#include <boost/process/windows.hpp>
+-#endif
++#include "libslic3r/BoostProcess.hpp"
+ #include <nlohmann/json.hpp>
+ 
+ #include <openssl/md5.h>
+@@ -70,9 +73,35 @@ std::string read_anycubic_bridge_token()
+ std::string create_anycubic_bridge_token()
+ {
+     const std::string token = boost::uuids::to_string(boost::uuids::random_generator()());
++#ifdef _WIN32
+     std::ofstream stream(anycubic_bridge_token_path().string(), std::ios::binary | std::ios::trunc);
+     stream << token;
+     return stream ? token : std::string();
++#else
++    // The token authorizes local bridge commands, so do not expose it through
++    // the process umask (which commonly permits group/other reads).
++    const int fd = ::open(anycubic_bridge_token_path().string().c_str(),
++                          O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
++    if (fd < 0)
++        return {};
++    if (::fchmod(fd, S_IRUSR | S_IWUSR) != 0) {
++        ::close(fd);
++        return {};
++    }
++
++    std::size_t written = 0;
++    while (written < token.size()) {
++        const ssize_t count = ::write(fd, token.data() + written, token.size() - written);
++        if (count < 0 && errno == EINTR)
++            continue;
++        if (count <= 0)
++            break;
++        written += static_cast<std::size_t>(count);
++    }
++    const bool complete = written == token.size();
++    const bool closed = ::close(fd) == 0;
++    return complete && closed ? token : std::string();
++#endif
+ }
+ 
+ bool local_anycubic_bridge_matches(const std::string& host)
+@@ -166,7 +195,7 @@ bool ensure_anycubic_bridge(const std::string& host)
+             python,
+             script.string(),
+             host,
+-            g_anycubic_bridge_token,
++            "@" + fs::absolute(anycubic_bridge_token_path()).string(),
+             boost::process::start_dir(script.parent_path().string()),
+ #ifdef _WIN32
+             boost::process::windows::create_no_window,
+diff --git a/src/slic3r/Utils/Bonjour.cpp b/src/slic3r/Utils/Bonjour.cpp
+index 0bff5b52..1bbcfbb4 100644
+--- a/src/slic3r/Utils/Bonjour.cpp
++++ b/src/slic3r/Utils/Bonjour.cpp
+@@ -9,6 +9,7 @@
+ #include <thread>
+ #include <boost/endian/conversion.hpp>
+ #include <boost/date_time/posix_time/posix_time_duration.hpp>
++#include <boost/asio/deadline_timer.hpp>
+ #include <boost/format.hpp>
+ #include <boost/log/trivial.hpp>
+ #include <boost/bind/bind.hpp>
+@@ -620,7 +621,7 @@ UdpSession::UdpSession(Bonjour::ReplyFn rfn) : replyfn(rfn)
+ 	buffer.resize(DnsMessage::MAX_SIZE);
+ }
+ 
+-UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multicast_address, const asio::ip::address& interface_address, std::shared_ptr< boost::asio::io_service > io_service)
++UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multicast_address, const asio::ip::address& interface_address, std::shared_ptr< boost::asio::io_context > io_service)
+ 	: replyfn(replyfn)
+ 	, multicast_address(multicast_address)
+ 	, socket(*io_service)
+@@ -654,7 +655,7 @@ UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multica
+ }
+ 
+ 
+-UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multicast_address, std::shared_ptr< boost::asio::io_service > io_service)
++UdpSocket::UdpSocket( Bonjour::ReplyFn replyfn, const asio::ip::address& multicast_address, std::shared_ptr< boost::asio::io_context > io_service)
+ 	: replyfn(replyfn)
+ 	, multicast_address(multicast_address)
+ 	, socket(*io_service)
+@@ -710,7 +711,7 @@ void UdpSocket::receive_handler(SharedSession session, const boost::system::erro
+ 	// let io_service to handle the datagram on session
+ 	// from boost documentation io_service::post:
+ 	// The io_service guarantees that the handler will only be called in a thread in which the run(), run_one(), poll() or poll_one() member functions is currently being invoked.
+-	io_service->post(boost::bind(&UdpSession::handle_receive, session, error, bytes));
++	boost::asio::post(*io_service, boost::bind(&UdpSession::handle_receive, session, error, bytes));
+ 	// immediately accept new datagrams
+ 	async_receive();
+ }
+@@ -867,7 +868,7 @@ void Bonjour::priv::lookup_perform()
+ {
+ 	service_dn = (boost::format("_%1%._%2%.local") % service % protocol).str();
+ 
+-	std::shared_ptr< boost::asio::io_service > io_service(new boost::asio::io_service);
++	std::shared_ptr< boost::asio::io_context > io_service(new boost::asio::io_context);
+ 
+ 	std::vector<LookupSocket*> sockets;
+ 
+@@ -962,7 +963,7 @@ void Bonjour::priv::resolve_perform()
+ 			rpls.push_back(reply);
+ 	};
+ 
+-	std::shared_ptr< boost::asio::io_service > io_service(new boost::asio::io_service);
++	std::shared_ptr< boost::asio::io_context > io_service(new boost::asio::io_context);
+ 	std::vector<ResolveSocket*> sockets;
+ 
+ 	// resolve interfaces - from PR#6646
+@@ -1203,4 +1204,3 @@ void Bonjour::resolve_sync()
+ 
+ 
+ }
+-
+diff --git a/src/slic3r/Utils/Bonjour.hpp b/src/slic3r/Utils/Bonjour.hpp
+index 50b71791..f77a7bba 100644
+--- a/src/slic3r/Utils/Bonjour.hpp
++++ b/src/slic3r/Utils/Bonjour.hpp
+@@ -151,11 +151,11 @@ public:
+ 	UdpSocket(Bonjour::ReplyFn replyfn
+ 		, const boost::asio::ip::address& multicast_address
+ 		, const boost::asio::ip::address& interface_address
+-		, std::shared_ptr< boost::asio::io_service > io_service);
++		, std::shared_ptr< boost::asio::io_context > io_service);
+ 
+ 	UdpSocket(Bonjour::ReplyFn replyfn
+ 		, const boost::asio::ip::address& multicast_address
+-		, std::shared_ptr< boost::asio::io_service > io_service);
++		, std::shared_ptr< boost::asio::io_context > io_service);
+ 
+ 	void send();
+ 	void async_receive();
+@@ -168,7 +168,7 @@ protected:
+ 	boost::asio::ip::address					    multicast_address;
+ 	boost::asio::ip::udp::socket					socket;
+ 	boost::asio::ip::udp::endpoint					mcast_endpoint;
+-	std::shared_ptr< boost::asio::io_service >	io_service;
++	std::shared_ptr< boost::asio::io_context >	io_service;
+ 	std::vector<BonjourRequest>						requests;
+ };
+ 
+@@ -182,7 +182,7 @@ public:
+ 		, Bonjour::ReplyFn replyfn
+ 		, const boost::asio::ip::address& multicast_address
+ 		, const boost::asio::ip::address& interface_address
+-		, std::shared_ptr< boost::asio::io_service > io_service)
++		, std::shared_ptr< boost::asio::io_context > io_service)
+ 		: UdpSocket(replyfn, multicast_address, interface_address, io_service)
+ 		, txt_keys(txt_keys)
+ 		, service(service)
+@@ -199,7 +199,7 @@ public:
+ 		, std::string protocol
+ 		, Bonjour::ReplyFn replyfn
+ 		, const boost::asio::ip::address& multicast_address
+-		, std::shared_ptr< boost::asio::io_service > io_service)
++		, std::shared_ptr< boost::asio::io_context > io_service)
+ 		: UdpSocket(replyfn, multicast_address, io_service)
+ 		, txt_keys(txt_keys)
+ 		, service(service)
+@@ -237,7 +237,7 @@ public:
+ 		, Bonjour::ReplyFn replyfn
+ 		, const boost::asio::ip::address& multicast_address
+ 		, const boost::asio::ip::address& interface_address
+-		, std::shared_ptr< boost::asio::io_service > io_service)
++		, std::shared_ptr< boost::asio::io_context > io_service)
+ 		: UdpSocket(replyfn, multicast_address, interface_address, io_service)
+ 		, hostname(hostname)
+ 
+@@ -249,7 +249,7 @@ public:
+ 	ResolveSocket(const std::string& hostname
+ 		, Bonjour::ReplyFn replyfn
+ 		, const boost::asio::ip::address& multicast_address
+-		, std::shared_ptr< boost::asio::io_service > io_service)
++		, std::shared_ptr< boost::asio::io_context > io_service)
+ 		: UdpSocket(replyfn, multicast_address, io_service)
+ 		, hostname(hostname)
+ 
+diff --git a/src/slic3r/Utils/Process.cpp b/src/slic3r/Utils/Process.cpp
+index 518462bb..ee94c33d 100644
+--- a/src/slic3r/Utils/Process.cpp
++++ b/src/slic3r/Utils/Process.cpp
+@@ -17,8 +17,7 @@
+ // For starting another OrcaSlicer instance on OSX.
+ // Fails to compile on Windows on the build server.
+ #ifdef __APPLE__
+-    #include <boost/process/spawn.hpp>
+-    #include <boost/process/args.hpp>
++    #include "libslic3r/BoostProcess.hpp"
+ #endif
+ 
+ #include <wx/stdpaths.h>
+diff --git a/src/slic3r/Utils/Serial.cpp b/src/slic3r/Utils/Serial.cpp
+index 4db1acc6..6bf2bb0f 100644
+--- a/src/slic3r/Utils/Serial.cpp
++++ b/src/slic3r/Utils/Serial.cpp
+@@ -278,11 +278,11 @@ std::vector<std::string> scan_serial_ports()
+ namespace asio = boost::asio;
+ using boost::system::error_code;
+ 
+-Serial::Serial(asio::io_service& io_service) :
++Serial::Serial(asio::io_context& io_service) :
+ 	asio::serial_port(io_service)
+ {}
+ 
+-Serial::Serial(asio::io_service& io_service, const std::string &name, unsigned baud_rate) :
++Serial::Serial(asio::io_context& io_service, const std::string &name, unsigned baud_rate) :
+ 	asio::serial_port(io_service, name)
+ {
+ 	set_baud_rate(baud_rate);
+diff --git a/src/slic3r/Utils/Serial.hpp b/src/slic3r/Utils/Serial.hpp
+index 8bad75b3..3eebc771 100644
+--- a/src/slic3r/Utils/Serial.hpp
++++ b/src/slic3r/Utils/Serial.hpp
+@@ -39,8 +39,8 @@ extern std::vector<SerialPortInfo> 	scan_serial_ports_extended();
+ class Serial : public boost::asio::serial_port
+ {
+ public:
+-	Serial(boost::asio::io_service &io_service);
+-	Serial(boost::asio::io_service &io_service, const std::string &name, unsigned baud_rate);
++	Serial(boost::asio::io_context &io_service);
++	Serial(boost::asio::io_context &io_service, const std::string &name, unsigned baud_rate);
+ 	Serial(const Serial &) = delete;
+ 	Serial &operator=(const Serial &) = delete;
+ 	~Serial();
+diff --git a/src/slic3r/Utils/TCPConsole.cpp b/src/slic3r/Utils/TCPConsole.cpp
+index 25802e39..63fd0a4b 100644
+--- a/src/slic3r/Utils/TCPConsole.cpp
++++ b/src/slic3r/Utils/TCPConsole.cpp
+@@ -170,7 +170,7 @@ bool TCPConsole::run_queue()
+ 
+         auto endpoints = m_resolver.resolve(m_host_name, m_port_name);
+ 
+-        m_socket.async_connect(endpoints->endpoint(),
++        m_socket.async_connect(endpoints.begin()->endpoint(),
+             boost::bind(&TCPConsole::handle_connect, this, boost::placeholders::_1)
+         );
+ 
+diff --git a/src/slic3r/plugin/PluginFsUtils.cpp b/src/slic3r/plugin/PluginFsUtils.cpp
+index 4d6aabe3..0060a862 100644
+--- a/src/slic3r/plugin/PluginFsUtils.cpp
++++ b/src/slic3r/plugin/PluginFsUtils.cpp
+@@ -1105,6 +1105,9 @@ bool read_wheel_plugin_metadata(const boost::filesystem::path& whl_path, PluginD
+ #elif __APPLE__
+                     if (tag.find("-macosx") != std::string::npos)
+                         compatible = true;
++#elif defined(__FreeBSD__)
++                    if (tag.find("-freebsd_") != std::string::npos)
++                        compatible = true;
+ #else
+                     if (tag.find("-linux") != std::string::npos || tag.find("-manylinux") != std::string::npos)
+                         compatible = true;
+diff --git a/src/slic3r/plugin/PluginLoader.cpp b/src/slic3r/plugin/PluginLoader.cpp
+index 0c45564f..77d6ba41 100644
+--- a/src/slic3r/plugin/PluginLoader.cpp
++++ b/src/slic3r/plugin/PluginLoader.cpp
+@@ -13,10 +13,7 @@
+ #include <boost/algorithm/string.hpp>
+ #include <boost/filesystem.hpp>
+ #include <boost/log/trivial.hpp>
+-#include <boost/process.hpp>
+-#ifdef _WIN32
+-#include <boost/process/windows.hpp>
+-#endif
++#include "libslic3r/BoostProcess.hpp"
+ 
+ #include <algorithm>
+ #include <chrono>
+diff --git a/src/slic3r/plugin/PythonInterpreter.cpp b/src/slic3r/plugin/PythonInterpreter.cpp
+index 3d180c2f..45b4bda3 100644
+--- a/src/slic3r/plugin/PythonInterpreter.cpp
++++ b/src/slic3r/plugin/PythonInterpreter.cpp
+@@ -161,8 +161,8 @@ std::string format_python_error(PyObject* ptype, PyObject* pvalue, PyObject* ptr
+ constexpr const char* PYTHON_DLL       = "python312.dll";
+ constexpr const char* PYTHON_DEBUG_DLL = "python312_d.dll";
+ #else
+-constexpr const char* PYTHON_STDLIB_DIR = "python3.12";
+-constexpr const char* PYTHON_EXECUTABLE = "python3.12";
++const std::string PYTHON_STDLIB_DIR = "python" + std::to_string(PY_MAJOR_VERSION) + "." + std::to_string(PY_MINOR_VERSION);
++const std::string PYTHON_EXECUTABLE = "python" + std::to_string(PY_MAJOR_VERSION) + "." + std::to_string(PY_MINOR_VERSION);
+ #endif
+ 
+ std::string executable_name(const char* base)
+@@ -527,7 +527,7 @@ bool PythonInterpreter::initialize()
+ 
+         // Log the exact paths being used for debugging
+         BOOST_LOG_TRIVIAL(info) << "Setting Python home to: " << python_home;
+-        BOOST_LOG_TRIVIAL(info) << "Python 3.12 stdlib path: " << python_lib.string();
++        BOOST_LOG_TRIVIAL(info) << "Python standard library path: " << python_lib.string();
+ 
+         // Verify encodings module exists
+         fs::path encodings_path = python_lib / "encodings";
+@@ -537,7 +537,7 @@ bool PythonInterpreter::initialize()
+             BOOST_LOG_TRIVIAL(warning) << "Encodings module NOT found at: " << encodings_path.string();
+         }
+ 
+-        BOOST_LOG_TRIVIAL(info) << "Using Python 3.12 PyConfig initialization API";
++        BOOST_LOG_TRIVIAL(info) << "Using Python PyConfig initialization API";
+ 
+         // Set Python home - this is the prefix where Python libraries are located
+         PyConfig config;
+diff --git a/src/libslic3r/BoostProcess.hpp b/src/libslic3r/BoostProcess.hpp
+new file mode 100644
+index 00000000..08344d91
+--- /dev/null
++++ b/src/libslic3r/BoostProcess.hpp
+@@ -0,0 +1,27 @@
++#ifndef slic3r_BoostProcess_hpp_
++#define slic3r_BoostProcess_hpp_
++
++// Boost 1.88 changed <boost/process.hpp> to expose Process v2. OrcaCubic
++// currently uses the v1 API, which remains available under its explicit
++// compatibility header in newer Boost releases.
++#include <boost/version.hpp>
++
++#if BOOST_VERSION >= 108800
++    // The v1 headers otherwise expose their API only in boost::process::v1.
++    // Keep the namespace used by OrcaCubic's existing call sites while v1 is
++    // still supplied as a Boost compatibility interface.
++    #ifndef BOOST_PROCESS_VERSION
++        #define BOOST_PROCESS_VERSION 1
++    #endif
++    #include <boost/process/v1.hpp>
++    #ifdef _WIN32
++        #include <boost/process/v1/windows.hpp>
++    #endif
++#else
++    #include <boost/process.hpp>
++    #ifdef _WIN32
++        #include <boost/process/windows.hpp>
++    #endif
++#endif
++
++#endif
+diff --git a/resources/scripts/tests/test_anycubic_bridge.py b/resources/scripts/tests/test_anycubic_bridge.py
+new file mode 100644
+index 00000000..49132f70
+--- /dev/null
++++ b/resources/scripts/tests/test_anycubic_bridge.py
+@@ -0,0 +1,278 @@
++"""Loopback-only regression checks for the Kobra X LAN bridge."""
++
++import base64
++import hashlib
++import importlib.util
++import json
++import os
++import ssl
++import sys
++import tempfile
++import threading
++import unittest
++from http.server import BaseHTTPRequestHandler, HTTPServer
++from pathlib import Path
++from unittest.mock import Mock, patch
++from urllib.error import HTTPError
++from urllib.parse import parse_qs, urlsplit
++from urllib.request import urlopen
++
++
++BRIDGE_SCRIPT = Path(__file__).resolve().parents[1] / "anycubic_lan_daemon.py"
++
++
++def load_bridge(token_argument):
++    old_argv = sys.argv
++    old_ip = os.environ.get("ORCACUBIC_PRINTER_IP")
++    old_token = os.environ.get("ORCACUBIC_BRIDGE_TOKEN")
++    try:
++        sys.argv = [str(BRIDGE_SCRIPT), "127.0.0.1", token_argument]
++        os.environ.pop("ORCACUBIC_PRINTER_IP", None)
++        os.environ.pop("ORCACUBIC_BRIDGE_TOKEN", None)
++        spec = importlib.util.spec_from_file_location("anycubic_lan_daemon_test", BRIDGE_SCRIPT)
++        bridge = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(bridge)
++        return bridge
++    finally:
++        sys.argv = old_argv
++        if old_ip is None:
++            os.environ.pop("ORCACUBIC_PRINTER_IP", None)
++        else:
++            os.environ["ORCACUBIC_PRINTER_IP"] = old_ip
++        if old_token is None:
++            os.environ.pop("ORCACUBIC_BRIDGE_TOKEN", None)
++        else:
++            os.environ["ORCACUBIC_BRIDGE_TOKEN"] = old_token
++
++
++class KobraXBridgeTest(unittest.TestCase):
++    def test_mqtt_worker_uses_exchanged_credentials(self):
++        bridge = load_bridge("synthetic-bridge-token")
++        bridge.creds = {"username": "synthetic-user", "password": "synthetic-password"}
++        client = Mock()
++        client.loop_start.side_effect = bridge.shutdown_event.set
++        with patch.object(bridge, "fetch_credentials", return_value=True), \
++                patch.object(bridge.mqtt, "Client", return_value=client) as make_client:
++            bridge.mqtt_worker()
++
++        self.assertEqual(make_client.call_args.args[0], bridge.mqtt.CallbackAPIVersion.VERSION2)
++        self.assertTrue(make_client.call_args.kwargs["client_id"].startswith("orca-daemon-"))
++        client.username_pw_set.assert_called_once_with("synthetic-user", "synthetic-password")
++        client.tls_set.assert_called_once_with(cert_reqs=ssl.CERT_NONE)
++        client.tls_insecure_set.assert_called_once_with(True)
++        self.assertIs(client.on_connect, bridge.on_mqtt_connect)
++        self.assertIs(client.on_disconnect, bridge.on_mqtt_disconnect)
++        self.assertIs(client.on_message, bridge.on_mqtt_message)
++        client.connect.assert_called_once_with("127.0.0.1", bridge.PRINTER_MQTT_PORT, 60)
++        client.loop_start.assert_called_once_with()
++
++    def test_mqtt_connection_state(self):
++        bridge = load_bridge("synthetic-bridge-token")
++        bridge.model_id = "20030"
++        bridge.device_id = "synthetic-device"
++        client = Mock()
++        bridge.mqtt_client = client
++        denied = bridge.mqtt.ReasonCode(bridge.mqtt.PacketTypes.CONNACK, "Not authorized")
++        accepted = bridge.mqtt.ReasonCode(bridge.mqtt.PacketTypes.CONNACK, "Success")
++
++        bridge.on_mqtt_connect(client, None, None, denied)
++        self.assertFalse(bridge.telemetry["connected"])
++        client.subscribe.assert_not_called()
++        client.publish.assert_not_called()
++
++        bridge.on_mqtt_connect(client, None, None, accepted)
++        self.assertTrue(bridge.telemetry["connected"])
++        client.subscribe.assert_called_once_with(
++            "anycubic/anycubicCloud/v1/printer/public/20030/synthetic-device/#"
++        )
++        bridge.on_mqtt_disconnect(client, None, None, 0)
++        self.assertFalse(bridge.telemetry["connected"])
++
++    def test_token_file_argument(self):
++        with tempfile.TemporaryDirectory() as directory:
++            token_path = Path(directory) / "bridge.token"
++            token_path.write_text("synthetic-bridge-token\n", encoding="ascii")
++            bridge = load_bridge("@" + str(token_path))
++
++        self.assertEqual(bridge.BRIDGE_TOKEN, "synthetic-bridge-token")
++        self.assertEqual(bridge.PRINTER_IP, "127.0.0.1")
++
++    def test_status_requires_token(self):
++        bridge = load_bridge("synthetic-bridge-token")
++        server = HTTPServer(("127.0.0.1", 0), bridge.BridgeServer)
++        thread = threading.Thread(target=server.serve_forever, daemon=True)
++        thread.start()
++        base_url = f"http://127.0.0.1:{server.server_port}"
++        try:
++            with urlopen(base_url + "/health", timeout=3) as response:
++                self.assertEqual(response.status, 200)
++            with self.assertRaises(HTTPError) as error:
++                urlopen(base_url + "/status", timeout=3)
++            self.assertEqual(error.exception.code, 403)
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join()
++
++    def test_signed_http_key_exchange(self):
++        bridge = load_bridge("synthetic-bridge-token")
++        printer_token = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"
++        iv = "0123456789abcdef"
++        credentials = {
++            "modelId": 20030,
++            "deviceId": "synthetic-device",
++            "username": "synthetic-user",
++            "password": "synthetic-password",
++        }
++        plain = json.dumps(credentials).encode()
++        encryptor = bridge.pyaes.Encrypter(
++            bridge.pyaes.AESModeOfOperationCBC(printer_token[16:].encode(), iv=iv.encode())
++        )
++        ciphertext = encryptor.feed(plain) + encryptor.feed()
++        seen = []
++
++        class MockPrinter(BaseHTTPRequestHandler):
++            def do_GET(self):
++                self.assert_request(self.path == "/info")
++                seen.append("info")
++                self.respond({"token": printer_token, "modelId": 20030,
++                              "deviceName": "Mock Kobra X"})
++
++            def do_POST(self):
++                url = urlsplit(self.path)
++                query = parse_qs(url.query)
++                self.assert_request(url.path == "/ctrl")
++                self.assert_request(query.get("did") == ["orca-bridge"])
++                self.assert_request(len(query.get("nonce", [""])[0]) == 6)
++                self.assert_request(self.headers.get("User-Agent") == "AnycubicSlicerNext/2.0.0.2")
++                self.assert_request(self.headers.get("Content-Length") == "0")
++                expected = hashlib.md5(
++                    (hashlib.md5(printer_token[:16].encode()).hexdigest()
++                     + query["ts"][0] + query["nonce"][0]).encode()
++                ).hexdigest()
++                self.assert_request(query.get("sign") == [expected])
++                seen.append("ctrl")
++                self.respond({"data": {"token": iv,
++                                        "info": base64.b64encode(ciphertext).decode()}})
++
++            def assert_request(self, condition):
++                if not condition:
++                    raise AssertionError("Unexpected Kobra X mock request")
++
++            def respond(self, payload):
++                body = json.dumps(payload).encode()
++                self.send_response(200)
++                self.send_header("Content-Type", "application/json")
++                self.send_header("Content-Length", str(len(body)))
++                self.end_headers()
++                self.wfile.write(body)
++
++            def log_message(self, *_args):
++                pass
++
++        server = HTTPServer(("127.0.0.1", 0), MockPrinter)
++        bridge.PRINTER_HTTP_PORT = server.server_port
++        thread = threading.Thread(target=server.serve_forever, daemon=True)
++        thread.start()
++        try:
++            self.assertTrue(bridge.fetch_credentials())
++            self.assertEqual(seen, ["info", "ctrl"])
++            self.assertEqual(bridge.creds, credentials)
++            self.assertEqual(bridge.model_id, "20030")
++            self.assertEqual(bridge.device_id, "synthetic-device")
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join()
++
++    def test_upload_and_local_print_message(self):
++        bridge = load_bridge("synthetic-bridge-token")
++        bridge.model_id = "20030"
++        bridge.device_id = "synthetic-device"
++        bridge.telemetry["connected"] = True
++        bridge.mqtt_client = Mock()
++        gcode = b"; loopback-only test\nG28\n"
++        uploads = []
++
++        class MockPrinter(BaseHTTPRequestHandler):
++            def do_POST(self):
++                length = int(self.headers["Content-Length"])
++                uploads.append((self.path, dict(self.headers), self.rfile.read(length)))
++                body = b'{"code": 200}'
++                self.send_response(200)
++                self.send_header("Content-Length", str(len(body)))
++                self.end_headers()
++                self.wfile.write(body)
++
++            def log_message(self, *_args):
++                pass
++
++        server = HTTPServer(("127.0.0.1", 0), MockPrinter)
++        bridge.telemetry["upload_url"] = f"http://127.0.0.1:{server.server_port}/gcode_upload"
++        thread = threading.Thread(target=server.serve_forever, daemon=True)
++        thread.start()
++        try:
++            with patch.object(bridge.time, "sleep"):
++                result = bridge.upload_and_start_print_file(
++                    gcode, "../synthetic.gcode", use_ams=False,
++                    task_settings={"auto_leveling": 0},
++                )
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join()
++
++        self.assertEqual(result["status"], "ok")
++        self.assertEqual(result["filename"], "synthetic.gcode")
++        self.assertEqual(len(uploads), 1)
++        path, headers, body = uploads[0]
++        self.assertEqual(path, "/gcode_upload")
++        self.assertEqual(headers["X-File-Length"], str(len(gcode)))
++        self.assertIn(b'filename="synthetic.gcode"', body)
++        self.assertIn(gcode, body)
++        bridge.mqtt_client.publish.assert_called_once()
++        topic, message = bridge.mqtt_client.publish.call_args.args
++        self.assertEqual(topic, "anycubic/anycubicCloud/v1/slicer/printer/20030/synthetic-device/print")
++        start = json.loads(message)
++        self.assertEqual(start["action"], "start")
++        self.assertEqual(start["data"]["filetype"], 1)
++        self.assertEqual(start["data"]["filename"], "synthetic.gcode")
++        self.assertEqual(start["data"]["md5"], hashlib.md5(gcode).hexdigest())
++        self.assertEqual(start["data"]["filesize"], len(gcode))
++        self.assertFalse(start["data"]["ams_settings"]["use_ams"])
++        self.assertEqual(start["data"]["task_settings"]["auto_leveling"], 0)
++
++    def test_upload_rejection_does_not_start_print(self):
++        bridge = load_bridge("synthetic-bridge-token")
++        bridge.telemetry["connected"] = True
++        bridge.mqtt_client = Mock()
++
++        class RejectingPrinter(BaseHTTPRequestHandler):
++            def do_POST(self):
++                self.rfile.read(int(self.headers["Content-Length"]))
++                body = b'{"code": 400, "message": "synthetic rejection"}'
++                self.send_response(200)
++                self.send_header("Content-Length", str(len(body)))
++                self.end_headers()
++                self.wfile.write(body)
++
++            def log_message(self, *_args):
++                pass
++
++        server = HTTPServer(("127.0.0.1", 0), RejectingPrinter)
++        bridge.telemetry["upload_url"] = f"http://127.0.0.1:{server.server_port}/gcode_upload"
++        thread = threading.Thread(target=server.serve_forever, daemon=True)
++        thread.start()
++        try:
++            result = bridge.upload_and_start_print_file(b"; test\n", "synthetic.gcode")
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join()
++
++        self.assertEqual(result, {"status": "error", "message": "synthetic rejection"})
++        bridge.mqtt_client.publish.assert_not_called()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/BUILD_FREEBSD.md b/BUILD_FREEBSD.md
+new file mode 100644
+index 00000000..e8ead8d8
+--- /dev/null
++++ b/BUILD_FREEBSD.md
+@@ -0,0 +1,111 @@
++# Building OrcaCubic on FreeBSD
++
++This is a native system-library build for FreeBSD 13.5 or later. It has been
++verified with Clang 19, CMake 3.31, Ninja 1.13, wxWidgets 3.2/GTK3, Boost 1.89,
++OpenCASCADE 7.9, and Python 3.11.
++
++## Dependencies
++
++Install the development packages through FreeBSD packages or ports. The tested
++package set includes:
++
++```sh
++pkg install cmake ninja llvm19 boost-libs python311 wx32-gtk3 opencv openvdb \
++    cgal eigen libnoise hidapi libsecret webkit2-gtk_41 glfw glew assimp \
++    nlopt onetbb gmp mpfr curl
++```
++
++Additional GUI/media dependencies are pulled in by wxWidgets and WebKitGTK on
++the tested package set. `wxInspector` is not packaged on FreeBSD: the build
++downloads OrcaCubic's pinned v1.0.0 source archive and applies the tracked
++wxWidgets 3.2 compatibility patch. Nothing is installed outside the build
++directory.
++
++FreeBSD uses the selected system Python development runtime rather than the
++Windows/macOS bundled Python distribution. No `pip` packages are required for
++the bundled Kobra X LAN bridge. The plugin loader recognizes FreeBSD native
++wheel platform tags for the selected Python ABI; third-party plugin
++compatibility still depends on the plugin and its available wheels.
++Installing a plugin's extra Python packages requires `uv`; this tested host
++does not have it. That optional feature can be enabled by configuring with
++`-DORCA_BUNDLED_UV_EXECUTABLE=/path/to/uv` after obtaining a FreeBSD-compatible
++`uv` executable. The Kobra X bridge and native slicer build do not need `uv`.
++
++The bridge's token-file handling, local HTTP authentication, signed HTTP/AES
++key exchange, MQTT credential/setup and connection status, and HTTP
++upload/MQTT start-message formatting have loopback-only or mocked regression
++tests that do not contact a printer.
++The mock upload rejection test also verifies that no start message is
++published after a rejected upload:
++
++```sh
++env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
++    resources/scripts/tests/test_anycubic_bridge.py -v
++```
++
++The bridge can be smoke-tested without a printer by running it with a
++loopback-only address and a disposable token, then requesting
++`http://127.0.0.1:18988/health` from another terminal. An unauthenticated
++request to `/status` should return HTTP 403. Stop the bridge after the test;
++this checks Python startup and local authentication, not a Kobra X connection.
++The GUI launcher instead creates an owner-only token file in its data directory
++and passes its path to the bridge, so the live token does not appear in the
++bridge command line. Keep that data directory private.
++
++```sh
++env PYTHONDONTWRITEBYTECODE=1 ORCACUBIC_BRIDGE_TOKEN=local-smoke-only \
++    python3 resources/scripts/anycubic_lan_daemon.py 127.0.0.1
++# In another terminal while the bridge is running:
++curl http://127.0.0.1:18988/health
++```
++
++## Configure and build
++
++Use an out-of-source build:
++
++```sh
++cmake -S . -B build-freebsd -G Ninja \
++    -DCMAKE_BUILD_TYPE=Release \
++    -DSLIC3R_STATIC=OFF \
++    -DSLIC3R_GUI=ON \
++    -DSLIC3R_GTK=3 \
++    -DOPENVDB_FIND_MODULE_PATH=/usr/local/lib/cmake/OpenVDB \
++    -DBUILD_TESTS=OFF -Wno-dev
++cmake --build build-freebsd --target OrcaSlicer --parallel 4
++```
++
++The resulting executable is `build-freebsd/src/orca-slicer`. It dynamically
++links against system libraries, including the FreeBSD Python runtime. Before
++using existing profiles, first start it in a graphical session with a separate
++data directory:
++
++```sh
++build-freebsd/src/orca-slicer --datadir /path/to/empty-orcacubic-data
++```
++
++With the default install prefix, `cmake --install build-freebsd` stages the
++application and resources privately under `build-freebsd/OrcaSlicer/`; it does
++not install a FreeBSD package or replace system libraries. The staged GUI can
++be started as `build-freebsd/OrcaSlicer/bin/orca-slicer --datadir
++/path/to/empty-orcacubic-data`. This staged layout was tested on FreeBSD 13.5.
++
++Do not point this initial run at an existing OrcaSlicer or Cura configuration.
++Once the GUI starts, use its import workflow to copy profiles rather than
++moving or overwriting source profiles. OrcaSlicer user preset `.json` and
++`.info` pairs can also be copied into the new data directory's
++`user/default/<preset-type>/` folder after the corresponding system printer
++has been enabled. Keep Cura configurations separate: Cura's `.cfg` format is
++not directly importable as an OrcaCubic preset.
++
++## Current validation boundary
++
++The native binary builds and launches its GUI on FreeBSD 13.5/GTK3. A copied
++OrcaSlicer filament preset and locally converted Cura printer/process/filament
++presets were loaded and selected with an isolated `--datadir`; a small model
++also sliced successfully through the command-line path. With a loopback-only
++Kobra X test profile, the GUI launched and stopped the bundled Python bridge
++correctly. These tests do not establish physical print safety. A full GUI
++slice, Kobra X LAN handshake, OctoPrint connection, and printer-side
++validation remain pending. In particular, do not send command-line test
++G-code to a printer unless the full machine profile and its inherited
++settings were loaded and reviewed.

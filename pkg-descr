@@ -1,0 +1,4 @@
+OrcaCubic is an OrcaSlicer fork with LAN support for the Anycubic Kobra X.
+This local FreeBSD port packages a pinned upstream revision plus the native
+FreeBSD build and runtime fixes. It installs a separate orcacubic launcher
+and does not include user profiles, API keys, or printer credentials.
