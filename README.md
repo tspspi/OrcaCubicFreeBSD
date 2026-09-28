@@ -26,6 +26,16 @@ to the make command.
 
 ## Running it
 
+OrcaCubic needs access to the graphics device nodes. Each user who runs it
+must be a member of the `video` group. As root, add a user with:
+
+```
+pw groupmod video -m username
+```
+
+Log out and back in before starting OrcaCubic so the desktop session picks up
+the new group membership.
+
 Run `orcacubic` from a terminal or use the OrcaCubic entry in the applications
 menu. The port deliberately does not install an `orca-slicer` command, so it
 does not replace an existing OrcaSlicer installation. The application binary

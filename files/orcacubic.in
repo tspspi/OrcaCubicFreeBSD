@@ -1,12 +1,12 @@
 #!/bin/sh
 for arg in "$@"; do
     case "$arg" in
-        --datadir|--datadir=*) exec "@PREFIX@/libexec/OrcaCubic/bin/orca-slicer" "$@" ;;
+        --datadir|--datadir=*) exec "%%PREFIX%%/libexec/OrcaCubic/bin/orca-slicer" "$@" ;;
     esac
 done
 if [ -e "${HOME}/.OrcaSlicer/OrcaSlicer.conf" ]; then
     echo "orcacubic: ~/.OrcaSlicer contains an OrcaSlicer configuration; move it aside or pass --datadir PATH" >&2
     exit 1
 fi
-exec "@PREFIX@/libexec/OrcaCubic/bin/orca-slicer" \
+exec "%%PREFIX%%/libexec/OrcaCubic/bin/orca-slicer" \
     --datadir "${HOME}/.OrcaSlicer" "$@"
