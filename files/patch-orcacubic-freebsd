@@ -131,6 +131,26 @@ index 74e3a5ea..5a6e0ace 100644
 -endif()
 \ No newline at end of file
 +endif()
+diff --git a/deps/CMakeLists.txt b/deps/CMakeLists.txt
+index ed3af70d..6db04418 100644
+--- a/deps/CMakeLists.txt
++++ b/deps/CMakeLists.txt
+@@ -432,7 +432,6 @@ if((REV_PARSE_RESULT EQUAL 0) AND (REV_PARSE_OUTPUT STREQUAL "true"))
+ endif ()
+ 
+ include(OCCT/OCCT.cmake)
+-include(OpenCV/OpenCV.cmake)
+ include(python3/python3.cmake)
+ include(wxInspector/wxInspector.cmake)
+ 
+@@ -447,7 +446,6 @@ set(_dep_list
+     dep_NLopt
+     dep_OpenVDB
+     dep_OpenCSG
+-    dep_OpenCV
+     dep_Eigen
+     dep_CGAL
+     dep_GLFW
 diff --git a/deps/wxInspector/0001-wx-3.2-compat.patch b/deps/wxInspector/0001-wx-3.2-compat.patch
 new file mode 100644
 index 00000000..84e858a2
@@ -480,28 +500,34 @@ index 0036af0a..c986dd0b 100644
      # run install() -- see the layout map above; lookup is bundled_uv_path().
      if(ORCA_BUNDLED_UV_EXECUTABLE AND EXISTS "${ORCA_BUNDLED_UV_EXECUTABLE}")
 diff --git a/src/libslic3r/CMakeLists.txt b/src/libslic3r/CMakeLists.txt
-index 2880a3cc..c4b97d9a 100644
+index 2880a3cc..0347d8df 100644
 --- a/src/libslic3r/CMakeLists.txt
 +++ b/src/libslic3r/CMakeLists.txt
-@@ -522,7 +522,13 @@ cmake_policy(SET CMP0011 NEW)
+@@ -186,6 +186,8 @@ set(lisbslic3r_sources
+     ColorDecomposeRecipe.hpp
+     TexturePainting.hpp
+     TexturePainting.cpp
++    TextureToColor/RGBImage.hpp
++    TextureToColor/TextureDecode.h
+     TextureToColor/TextureToColor.hpp
+     TextureToColor/TextureToColor.cpp
+     TextureToColor/ColorUtils.hpp
+@@ -522,7 +524,6 @@ cmake_policy(SET CMP0011 NEW)
  # can't reach it; the default opts its Boost lookup into BoostConfig (CMP0167).
  set(CMAKE_POLICY_DEFAULT_CMP0167 NEW)
  find_package(CGAL REQUIRED)
 -find_package(OpenCV REQUIRED core)
-+if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
-+    # The FreeBSD package exports individual OpenCV component targets instead
-+    # of the monolithic opencv_world target built by OrcaSlicer's superbuild.
-+    find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
-+else ()
-+    find_package(OpenCV REQUIRED core)
-+endif ()
  find_package(assimp REQUIRED)
  unset(CMAKE_POLICY_DEFAULT_CMP0167)
  cmake_policy(POP)
-@@ -575,12 +581,21 @@ target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
+@@ -574,13 +575,25 @@ target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
+ 
  find_package(JPEG REQUIRED)
  find_package(Draco REQUIRED)
- 
++add_library(texture_decode STATIC TextureToColor/TextureDecode.c)
++target_link_libraries(texture_decode PRIVATE PNG::PNG JPEG::JPEG)
++target_link_libraries(libslic3r PRIVATE texture_decode)
++
 +if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
 +    # OCCT 7.9 consolidates the legacy TKXDESTEP/TKSTEP* modules.
 +    set(OCCT_STEP_LIBS TKDE TKDESTEP)
@@ -514,7 +540,7 @@ index 2880a3cc..c4b97d9a 100644
 +        TKSTEPBase
 +    )
 +endif ()
-+
+ 
  set(OCCT_LIBS
 -    TKXDESTEP
 -    TKSTEP
@@ -525,26 +551,14 @@ index 2880a3cc..c4b97d9a 100644
      TKXCAF
      TKXSBase
      TKVCAF
-@@ -611,7 +626,7 @@ target_link_libraries(libslic3r
+@@ -611,7 +624,6 @@ target_link_libraries(libslic3r
          libigl
          libnest2d
          miniz
 -        opencv_world
-+        $<$<NOT:$<PLATFORM_ID:FreeBSD>>:opencv_world>
          assimp::assimp
      PRIVATE
          ${CMAKE_DL_LIBS}
-@@ -637,6 +652,10 @@ target_link_libraries(libslic3r
-         OpenSSL::Crypto
-     )
- 
-+if (CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
-+    target_link_libraries(libslic3r PUBLIC opencv_core opencv_imgcodecs opencv_imgproc)
-+endif ()
-+
- if(NOT WIN32)
-     # Link freetype for OCCT dependency (CAD operations need font rendering)
-     target_link_libraries(libslic3r PRIVATE ${FREETYPE_LIBRARIES})
 diff --git a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp b/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
 index 97f8f743..8c1949b9 100644
 --- a/src/libslic3r/Feature/FuzzySkin/FuzzySkin.cpp
@@ -588,6 +602,413 @@ index 3a2055e5..5c8eec43 100644
      asio::serial_port serial;
      boost::thread background_thread;
      boost::asio::streambuf read_buffer, write_buffer;
+diff --git a/src/libslic3r/ObjColorUtils.cpp b/src/libslic3r/ObjColorUtils.cpp
+index 37612674..2c9f7f7a 100644
+--- a/src/libslic3r/ObjColorUtils.cpp
++++ b/src/libslic3r/ObjColorUtils.cpp
+@@ -1,15 +1,108 @@
+ #include "ObjColorUtils.hpp"
+ 
+-bool obj_color_deal_algo(std::vector<Slic3r::RGBA> & input_colors,
+-                         std::vector<Slic3r::RGBA> & cluster_colors_from_algo,
+-                         std::vector<int> &         cluster_labels_from_algo,
+-                         char &                     cluster_number,
+-                         int                        max_cluster)
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <limits>
++#include <map>
++
++#include "TextureToColor/ColorUtils.hpp"
++
++bool obj_color_deal_algo(std::vector<Slic3r::RGBA>& input_colors,
++                         std::vector<Slic3r::RGBA>& cluster_colors_from_algo,
++                         std::vector<int>& cluster_labels_from_algo,
++                         char& cluster_number,
++                         int max_cluster)
+ {
+-    QuantKMeans quant(10);
+-    quant.apply(input_colors, cluster_colors_from_algo, cluster_labels_from_algo, (int) cluster_number, max_cluster);
+-    if (cluster_number == -1) {
++    using namespace Slic3r::tex2color::color_utils;
++
++    cluster_colors_from_algo.clear();
++    cluster_labels_from_algo.clear();
++    if (input_colors.empty() || max_cluster < 1)
++        return false;
++
++    std::vector<Color> colors;
++    colors.reserve(input_colors.size());
++    for (const auto& rgba : input_colors) {
++        colors.push_back({
++            static_cast<std::size_t>(std::clamp(rgba[0] * 255.f, 0.f, 255.f)),
++            static_cast<std::size_t>(std::clamp(rgba[1] * 255.f, 0.f, 255.f)),
++            static_cast<std::size_t>(std::clamp(rgba[2] * 255.f, 0.f, 255.f))
++        });
++    }
++
++    // The former OpenCV implementation tried increasing K until two centres
++    // coincided. The existing texture-colour k-means provides a perceptual
++    // Lab-space starting palette and handles the distinct-colour cap.
++    ClusterParameters parameters;
++    parameters.color_difference_method = ColorDifferenceMethod::Lab;
++    parameters.max_iter = 300;
++    parameters.cluster_k = cluster_number > 0
++        ? std::min<int>(cluster_number, max_cluster)
++        : static_cast<std::size_t>(max_cluster);
++    std::vector<Color> centers = cluster_k_means(colors, parameters);
++    if (centers.empty())
+         return false;
++
++    // cluster_k_means deduplicates its input. OBJ face colours need their
++    // original frequencies: a colour used on 1,000 faces should influence
++    // the palette more than one used on a single face, as in the old path.
++    std::map<Color, std::size_t> frequencies;
++    for (const Color& color : colors)
++        ++frequencies[color];
++    for (int iteration = 0; iteration < 20; ++iteration) {
++        std::vector<std::array<double, 3>> sums(centers.size(), {0., 0., 0.});
++        std::vector<std::size_t> weights(centers.size(), 0);
++        for (const auto& [color, count] : frequencies) {
++            double best_distance = std::numeric_limits<double>::infinity();
++            std::size_t best = 0;
++            for (std::size_t i = 0; i < centers.size(); ++i) {
++                const double distance = calc_rgb_color_difference_by_ciede2000(color, centers[i]);
++                if (distance < best_distance) {
++                    best_distance = distance;
++                    best = i;
++                }
++            }
++            for (int channel = 0; channel < 3; ++channel)
++                sums[best][channel] += static_cast<double>(color[channel]) * static_cast<double>(count);
++            weights[best] += count;
++        }
++        bool changed = false;
++        for (std::size_t i = 0; i < centers.size(); ++i) {
++            if (weights[i] == 0)
++                continue;
++            for (int channel = 0; channel < 3; ++channel) {
++                const auto value = static_cast<std::size_t>(std::lround(sums[i][channel] / weights[i]));
++                changed |= centers[i][channel] != value;
++                centers[i][channel] = value;
++            }
++        }
++        if (!changed)
++            break;
++    }
++
++    cluster_colors_from_algo.reserve(centers.size());
++    for (const Color& center : centers) {
++        cluster_colors_from_algo.push_back({
++            static_cast<float>(center[0]) / 255.f,
++            static_cast<float>(center[1]) / 255.f,
++            static_cast<float>(center[2]) / 255.f,
++            1.f
++        });
++    }
++
++    cluster_labels_from_algo.reserve(colors.size());
++    for (const Color& color : colors) {
++        double best_distance = std::numeric_limits<double>::infinity();
++        int best_label = 0;
++        for (std::size_t i = 0; i < centers.size(); ++i) {
++            const double distance = calc_rgb_color_difference_by_ciede2000(color, centers[i]);
++            if (distance < best_distance) {
++                best_distance = distance;
++                best_label = static_cast<int>(i);
++            }
++        }
++        cluster_labels_from_algo.push_back(best_label);
+     }
+     return true;
+-}
+\ No newline at end of file
++}
+diff --git a/src/libslic3r/ObjColorUtils.hpp b/src/libslic3r/ObjColorUtils.hpp
+index b587c808..1f795021 100644
+--- a/src/libslic3r/ObjColorUtils.hpp
++++ b/src/libslic3r/ObjColorUtils.hpp
+@@ -1,268 +1,14 @@
+ #pragma once
+-#include <iostream>
+-#include <ctime>
+ 
+-#include "opencv2/opencv.hpp"
+-#include "libslic3r/Color.hpp"
+-class QuantKMeans
+-{
+-public:
+-    int     m_alpha_thres;
+-    cv::Mat m_flatten_labels;
+-    cv::Mat m_centers8UC3;
+-    QuantKMeans(int alpha_thres = 10) : m_alpha_thres(alpha_thres) {}
+-    void apply(cv::Mat &ori_image, cv::Mat &new_image, int num_cluster, int color_space)
+-    {
+-        cv::Mat image;
+-        convert_color_space(ori_image, image, color_space);
+-        cv::Mat flatten_image = flatten(image);
+-
+-        apply(flatten_image, num_cluster, color_space);
+-        replace_centers(ori_image, new_image);
+-    }
+-    void apply_aplha(cv::Mat &ori_image, cv::Mat &new_image, int num_cluster, int color_space)
+-    {
+-        // cout << " *** DoAlpha *** " << endl;
+-        cv::Mat flatten_image8UC3 = flatten_alpha(ori_image);
+-        cv::Mat image8UC3;
+-        convert_color_space(flatten_image8UC3, image8UC3, color_space);
+-        cv::Mat image32FC3(image8UC3.rows, 1, CV_32FC3);
+-        for (int i = 0; i < image8UC3.rows; i++)
+-            image32FC3.at<cv::Vec3f>(i, 0) = image8UC3.at<cv::Vec3b>(i, 0);
+-
+-        apply(image32FC3, num_cluster, color_space);
+-        repalce_centers_aplha(ori_image, new_image);
+-    }
+-    void apply(cv::Mat &flatten_image, int num_cluster, int color_space)
+-    {
+-        cv::Mat centers32FC3;
+-        num_cluster = fmin(flatten_image.rows, num_cluster);
+-        kmeans(flatten_image, num_cluster, this->m_flatten_labels, cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 300, 0.5), 3, cv::KMEANS_PP_CENTERS,
+-               centers32FC3);
+-        this->m_centers8UC3 = cv::Mat(num_cluster, 1, CV_8UC3);
+-        for (int i = 0; i < num_cluster; i++) this->m_centers8UC3.at<cv::Vec3b>(i) = centers32FC3.at<cv::Vec3f>(i);
+-
+-        convert_color_space(this->m_centers8UC3, this->m_centers8UC3, color_space, true);
+-    }
+-    void apply(const std::vector<std::array<float, 4>> &ori_colors,
+-               std::vector<std::array<float, 4>> &      cluster_results,
+-               std::vector<int> &                       labels,
+-               int                                      num_cluster = -1,
+-               int                                      max_cluster = 15,
+-               int                                      color_space = 2)
+-    {
+-        // 0~255
+-        cv::Mat flatten_image8UC3 = flatten_vector(ori_colors);
+-
+-        this->apply(flatten_image8UC3, cluster_results, labels, num_cluster, max_cluster, color_space);
+-    }
+-    void apply(const cv::Mat &                    flatten_image8UC3,
+-               std::vector<std::array<float, 4>> &cluster_results,
+-               std::vector<int> &                 labels,
+-               int                                num_cluster = -1,
+-               int                                max_cluster = 15,
+-               int                                color_space = 2)
+-    {
+-        cv::Mat image8UC3;
+-        convert_color_space(flatten_image8UC3, image8UC3, color_space);
+-
+-        cv::Mat image32FC3(image8UC3.rows, 1, CV_32FC3);
+-        for (int i = 0; i < image8UC3.rows; i++)
+-            image32FC3.at<cv::Vec3f>(i, 0) = image8UC3.at<cv::Vec3b>(i, 0);
+-
+-        int    best_cluster = 1;
+-        double cur_score = 0, best_score = 100;
+-        num_cluster = fmin(num_cluster, max_cluster);
+-        if (num_cluster < 1) {
+-            if (!this->more_than_request(image8UC3, max_cluster)) max_cluster = compute_num_colors(image8UC3);
+-            num_cluster = fmin(num_cluster, max_cluster);
+-            cur_score  = cv::kmeans(image32FC3, 1, this->m_flatten_labels, cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 300, 0.5), 3, cv::KMEANS_PP_CENTERS);
+-            best_score = cur_score;
+-
+-            for (int cur_cluster = 2; cur_cluster < max_cluster + 1; cur_cluster++) {
+-                cv::Mat centers32FC3;
+-                cur_score = cv::kmeans(image32FC3, cur_cluster, this->m_flatten_labels, cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 300, 0.5), 3,
+-                                       cv::KMEANS_PP_CENTERS, centers32FC3);
+-                if (this->repeat_center(cur_cluster, centers32FC3, color_space))
+-                    break;
+-                best_cluster = cur_score < best_score ? cur_cluster : best_cluster;
+-                best_score   = cur_score < best_score ? cur_score : best_score;
+-            }
+-        } else if (this->more_than_request(image8UC3, num_cluster))
+-            best_cluster = num_cluster;
+-        else {
+-            best_cluster = compute_num_colors(image8UC3);
+-            std::cout << "num of image color is " << best_cluster << ", less than custom number " << num_cluster << std::endl;
+-        }
+-
+-        cv::Mat centers32FC3;
+-        cv::kmeans(image32FC3, best_cluster, this->m_flatten_labels, cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 300, 0.5), 3, cv::KMEANS_PP_CENTERS,
+-                   centers32FC3);
+-        this->m_centers8UC3 = cv::Mat(best_cluster, 1, CV_8UC3);
+-        for (int i = 0; i < best_cluster; i++) {
+-            auto center                          = centers32FC3.row(i);
+-            this->m_centers8UC3.at<cv::Vec3b>(i) = {uchar(center.at<float>(0)), uchar(center.at<float>(1)), uchar(center.at<float>(2))};
+-        }
+-        convert_color_space(this->m_centers8UC3, this->m_centers8UC3, color_space, true);
+-
+-        cluster_results.clear();
+-        labels.clear();
+-        for (int i = 0; i < flatten_image8UC3.rows; i++)
+-            labels.emplace_back(this->m_flatten_labels.at<int>(i, 0));
+-        for (int i = 0; i < best_cluster; i++) {
+-            cv::Vec3f center = this->m_centers8UC3.at<cv::Vec3b>(i, 0);
+-            cluster_results.emplace_back(std::array<float, 4>{center[0] / 255.f, center[1] / 255.f, center[2] / 255.f, 1.f});
+-        }
+-    }
++#include <cassert>
++#include <vector>
+ 
+-    bool more_than_request(const cv::Mat &image8UC3, int target_num)
+-    {
+-        std::vector<cv::Vec3b> uniqueImage;
+-        cv::Vec3b              cur_color;
+-        for (int i = 0; i < image8UC3.rows; i++) {
+-            cur_color = image8UC3.at<cv::Vec3b>(i, 0);
+-            if (!is_in(cur_color, uniqueImage)) {
+-                uniqueImage.emplace_back(cur_color);
+-                if (uniqueImage.size() >= target_num) return true;
+-            }
+-        }
+-        return false;
+-    }
+-
+-    int compute_num_colors(const cv::Mat &image8UC3)
+-    {
+-        std::vector<cv::Vec3b> uniqueImage;
+-        cv::Vec3b              cur_color;
+-        for (int i = 0; i < image8UC3.rows; i++) {
+-            cur_color = image8UC3.at<cv::Vec3b>(i, 0);
+-            if (!is_in(cur_color, uniqueImage)) uniqueImage.emplace_back(cur_color);
+-        }
+-
+-        return uniqueImage.size();
+-    }
+-
+-    bool is_in(const cv::Vec3b &cur_color, const std::vector<cv::Vec3b> &uniqueImage)
+-    {
+-        for (auto &color : uniqueImage)
+-            if (cur_color[0] == color[0] && cur_color[1] == color[1] && cur_color[2] == color[2]) return true;
+-        return false;
+-    }
+-
+-    bool repeat_center(int cur_cluster, const cv::Mat &centers32FC3, int color_space)
+-    {
+-        cv::Mat centers8UC3 = cv::Mat(cur_cluster, 1, CV_8UC3);
+-        for (int i = 0; i < cur_cluster; i++) {
+-            auto center = centers32FC3.row(i);
+-            centers8UC3.at<cv::Vec3b>(i) = {uchar(center.at<float>(0)), uchar(center.at<float>(1)), uchar(center.at<float>(2))};
+-        }
+-        convert_color_space(centers8UC3, centers8UC3, color_space, true);
+-        std::vector<cv::Vec3b> unique_centers;
+-        cv::Vec3b              cur_center;
+-        for (int i = 0; i < cur_cluster; i++) {
+-            cur_center = centers8UC3.at<cv::Vec3b>(i, 0);
+-            if (!is_in(cur_center, unique_centers))
+-                unique_centers.emplace_back(cur_center);
+-            else
+-                return true;
+-        }
+-        return false;
+-    }
+-
+-    void replace_centers(cv::Mat &ori_image, cv::Mat &new_image)
+-    {
+-        for (int i = 0; i < ori_image.rows; i++) {
+-            for (int j = 0; j < ori_image.cols; j++) {
+-                int       idx                 = this->m_flatten_labels.at<int>(i * ori_image.cols + j, 0);
+-                cv::Vec3b pixel               = this->m_centers8UC3.at<cv::Vec3b>(idx);
+-                new_image.at<cv::Vec3b>(i, j) = pixel;
+-            }
+-        }
+-    }
+-    void repalce_centers_aplha(cv::Mat &ori_image, cv::Mat &new_image)
+-    {
+-        int       cnt = 0;
+-        int       idx;
+-        cv::Vec3b center;
+-        for (int i = 0; i < ori_image.rows; i++) {
+-            for (int j = 0; j < ori_image.cols; j++) {
+-                cv::Vec4b pixel = ori_image.at<cv::Vec4b>(i, j);
+-                if ((int) pixel[3] < this->m_alpha_thres)
+-                    new_image.at<cv::Vec4b>(i, j) = pixel;
+-                else {
+-                    idx                           = this->m_flatten_labels.at<int>(cnt++, 0);
+-                    center                        = this->m_centers8UC3.at<cv::Vec3b>(idx);
+-                    new_image.at<cv::Vec4b>(i, j) = cv::Vec4b(center[0], center[1], center[2], pixel[3]);
+-                }
+-            }
+-        }
+-    }
+-
+-    void convert_color_space(const cv::Mat &ori_image, cv::Mat &image, int color_space, bool reverse = false)
+-    {
+-        switch (color_space) {
+-        case 0: image = ori_image; break;
+-        case 1:
+-            if (reverse)
+-                cvtColor(ori_image, image, cv::COLOR_HSV2BGR);
+-            else
+-                cvtColor(ori_image, image, cv::COLOR_BGR2HSV);
+-            break;
+-        case 2:
+-            if (reverse)
+-                cvtColor(ori_image, image, cv::COLOR_Lab2BGR);
+-            else
+-                cvtColor(ori_image, image, cv::COLOR_BGR2Lab);
+-            break;
+-        default: break;
+-        }
+-    }
+-
+-    cv::Mat flatten(cv::Mat &image)
+-    {
+-        int     num_pixels = image.rows * image.cols;
+-        cv::Mat img(num_pixels, 1, CV_32FC3);
+-        for (int i = 0; i < image.rows; i++) {
+-            for (int j = 0; j < image.cols; j++) {
+-                cv::Vec3f pixel                          = image.at<cv::Vec3b>(i, j);
+-                img.at<cv::Vec3f>(i * image.cols + j, 0) = pixel;
+-            }
+-        }
+-        return img;
+-    }
+-    cv::Mat flatten_alpha(cv::Mat &image)
+-    {
+-        int num_pixels = image.rows * image.cols;
+-        for (int i = 0; i < image.rows; i++)
+-            for (int j = 0; j < image.cols; j++) {
+-                cv::Vec4b pixel = image.at<cv::Vec4b>(i, j);
+-                if ((int) pixel[3] < this->m_alpha_thres) num_pixels--;
+-            }
+-
+-        cv::Mat img(num_pixels, 1, CV_8UC3);
+-        int     cnt = 0;
+-        for (int i = 0; i < image.rows; i++) {
+-            for (int j = 0; j < image.cols; j++) {
+-                cv::Vec4b pixel = image.at<cv::Vec4b>(i, j);
+-                if ((int) pixel[3] >= this->m_alpha_thres) img.at<cv::Vec3b>(cnt++, 0) = cv::Vec3b(pixel[0], pixel[1], pixel[2]);
+-            }
+-        }
+-        return img;
+-    }
+-    cv::Mat flatten_vector(const std::vector<std::array<float, 4>> &ori_colors)
+-    {
+-        int num_pixels = ori_colors.size();
+-
+-        cv::Mat image8UC3(num_pixels, 1, CV_8UC3);
+-        for (int i = 0; i < num_pixels; i++) {
+-            std::array<float, 4> pixel    = ori_colors[i];
+-            image8UC3.at<cv::Vec3b>(i, 0) = cv::Vec3b((int) (pixel[0] * 255.f), (int) (pixel[1] * 255.f), (int) (pixel[2] * 255.f));
+-        }
+-        return image8UC3;
+-    }
+-};
++#include "libslic3r/Color.hpp"
+ 
+-bool obj_color_deal_algo(std::vector<Slic3r::RGBA> &input_colors,
+-                         std::vector<Slic3r::RGBA>&   cluster_colors_from_algo,
+-                         std::vector<int>&            cluster_labels_from_algo,
+-                         char &                     cluster_number,
+-                         int                        max_cluster);
+\ No newline at end of file
++// Reduce imported OBJ colours to a filament-sized palette. cluster_number <= 0
++// selects a palette size automatically, capped by max_cluster.
++bool obj_color_deal_algo(std::vector<Slic3r::RGBA>& input_colors,
++                         std::vector<Slic3r::RGBA>& cluster_colors_from_algo,
++                         std::vector<int>& cluster_labels_from_algo,
++                         char& cluster_number,
++                         int max_cluster);
 diff --git a/src/libslic3r/Platform.cpp b/src/libslic3r/Platform.cpp
 index d2ca27fa..b2de7af4 100644
 --- a/src/libslic3r/Platform.cpp
@@ -632,6 +1053,351 @@ index c943235e..a82a8379 100644
      OpenBSD,         // For Platform::BSDUnix
      GenericOSX,      // For Platform::OSX
      OSXOnX86,        // For Apple's on Intel X86 CPU
+diff --git a/src/libslic3r/TexturePainting.cpp b/src/libslic3r/TexturePainting.cpp
+index 9f83f282..6c3136e8 100644
+--- a/src/libslic3r/TexturePainting.cpp
++++ b/src/libslic3r/TexturePainting.cpp
+@@ -2,18 +2,17 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstring>
++#include <limits>
+ #include <map>
+ #include <set>
+ #include <utility>
+ 
+-#include <opencv2/core.hpp>
+-#include <opencv2/imgcodecs.hpp>
+-#include <opencv2/imgproc.hpp>
+-
+ #include <boost/log/trivial.hpp>
+ 
+ #include "TextureToColor/TextureToColor.hpp"
+ #include "TextureToColor/ColorUtils.hpp"
++#include "TextureToColor/TextureDecode.h"
+ 
+ #include "Model.hpp"
+ #include "TriangleMesh.hpp"
+@@ -21,30 +20,38 @@
+ 
+ namespace Slic3r {
+ 
+-static cv::Mat decode_texture_image(const TextureImage& img) {
++static tex2color::RGBImage decode_texture_image(const TextureImage& img) {
+     if (img.data.empty())
+         return {};
+ 
+     // Raw encoded image data (PNG/JPEG) from glTF loader: width == -1
+     if (img.width <= 0 || img.height <= 0) {
+-        std::vector<unsigned char> buf(img.data.begin(), img.data.end());
+-        cv::Mat raw(1, static_cast<int>(buf.size()), CV_8UC1, buf.data());
+-        cv::Mat decoded = cv::imdecode(raw, cv::IMREAD_COLOR);
++        TextureDecodedRGB raw{};
++        if (!decode_texture_rgb(img.data.data(), img.data.size(), &raw))
++            return {};
++        tex2color::RGBImage decoded(raw.width, raw.height);
++        for (std::size_t i = 0; i < decoded.pixels.size(); i += 3) {
++            decoded.pixels[i] = raw.pixels[i + 2];
++            decoded.pixels[i + 1] = raw.pixels[i + 1];
++            decoded.pixels[i + 2] = raw.pixels[i];
++        }
++        free_texture_decoded_rgb(&raw);
+         return decoded;
+     }
+ 
+-    int cv_type = (img.channels == 4) ? CV_8UC4 : CV_8UC3;
+-    std::vector<unsigned char> pixel_buf(img.data.begin(), img.data.end());
+-    cv::Mat src(img.height, img.width, cv_type, pixel_buf.data());
+-
+-    cv::Mat bgr;
+-    if (img.channels == 4)
+-        cv::cvtColor(src, bgr, cv::COLOR_RGBA2BGR);
+-    else if (img.channels == 3)
+-        cv::cvtColor(src, bgr, cv::COLOR_RGB2BGR);
+-    else
++    if (img.channels != 3 && img.channels != 4)
+         return {};
+-
++    if (std::size_t(img.width) > std::numeric_limits<std::size_t>::max() / std::size_t(img.height) / 3)
++        return {};
++    const std::size_t pixel_count = std::size_t(img.width) * img.height;
++    if (pixel_count > img.data.size() / std::size_t(img.channels))
++        return {};
++    tex2color::RGBImage bgr(img.width, img.height);
++    for (std::size_t i = 0; i < pixel_count; ++i) {
++        bgr.pixels[3 * i] = static_cast<unsigned char>(img.data[img.channels * i + 2]);
++        bgr.pixels[3 * i + 1] = static_cast<unsigned char>(img.data[img.channels * i + 1]);
++        bgr.pixels[3 * i + 2] = static_cast<unsigned char>(img.data[img.channels * i]);
++    }
+     return bgr;
+ }
+ 
+@@ -137,10 +144,10 @@ static void extract_painted_mesh(
+ // silently aliased onto textures[0].
+ static bool build_multi_texture_atlas(
+     const TexturedMesh& textured,
+-    cv::Mat& out_atlas,
++    tex2color::RGBImage& out_atlas,
+     std::vector<std::vector<Vec2f>>& out_uv_coords)
+ {
+-    std::vector<cv::Mat> decoded;
++    std::vector<tex2color::RGBImage> decoded;
+     decoded.reserve(textured.textures.size());
+     for (const auto& ti : textured.textures)
+         decoded.push_back(decode_texture_image(ti));
+@@ -167,8 +174,10 @@ static bool build_multi_texture_atlas(
+         if (decoded[i].empty()) continue;
+         if (first_usable_tex < 0) first_usable_tex = static_cast<int>(i);
+         y_offsets[i] = atlas_h;
+-        atlas_w = std::max(atlas_w, decoded[i].cols);
+-        atlas_h += decoded[i].rows;
++        atlas_w = std::max(atlas_w, decoded[i].width);
++        if (decoded[i].height > std::numeric_limits<int>::max() - atlas_h)
++            return false;
++        atlas_h += decoded[i].height;
+     }
+     if (atlas_w == 0 || atlas_h == 0)
+         return false;
+@@ -184,23 +193,28 @@ static bool build_multi_texture_atlas(
+         if (resolve_tex_idx(mat_idx) >= 0) continue;
+         if (static_cast<size_t>(mat_idx) >= textured.material_colors.size()) continue;
+         if (mat_solid_y.find(mat_idx) != mat_solid_y.end()) continue;
++        if (atlas_h == std::numeric_limits<int>::max())
++            return false;
+         mat_solid_y[mat_idx]     = atlas_h++;
+         mat_solid_color[mat_idx] = textured.material_colors[mat_idx];
+     }
+ 
+-    out_atlas = cv::Mat::zeros(atlas_h, atlas_w, CV_8UC3);
++    if (std::size_t(atlas_w) > std::numeric_limits<std::size_t>::max() / std::size_t(atlas_h) / 3)
++        return false;
++    out_atlas = tex2color::RGBImage(atlas_w, atlas_h);
+     for (size_t i = 0; i < decoded.size(); ++i) {
+         if (decoded[i].empty()) continue;
+-        cv::Mat roi = out_atlas(cv::Rect(0, y_offsets[i], decoded[i].cols, decoded[i].rows));
+-        decoded[i].copyTo(roi);
++        for (int row = 0; row < decoded[i].height; ++row)
++            std::memcpy(out_atlas.pixel(y_offsets[i] + row, 0),
++                        decoded[i].pixel(row, 0), std::size_t(decoded[i].width) * 3);
+     }
+     for (const auto& kv : mat_solid_color) {
+         const auto& c = kv.second;
+-        // OpenCV stores BGR; baseColor is RGBA in [0,1].
+-        out_atlas.at<cv::Vec3b>(mat_solid_y[kv.first], 0) = cv::Vec3b(
+-            static_cast<uchar>(std::clamp(c[2] * 255.f, 0.f, 255.f)),
+-            static_cast<uchar>(std::clamp(c[1] * 255.f, 0.f, 255.f)),
+-            static_cast<uchar>(std::clamp(c[0] * 255.f, 0.f, 255.f)));
++        // The atlas stores BGR; baseColor is RGBA in [0,1].
++        auto* pixel = out_atlas.pixel(mat_solid_y[kv.first], 0);
++        pixel[0] = static_cast<unsigned char>(std::clamp(c[2] * 255.f, 0.f, 255.f));
++        pixel[1] = static_cast<unsigned char>(std::clamp(c[1] * 255.f, 0.f, 255.f));
++        pixel[2] = static_cast<unsigned char>(std::clamp(c[0] * 255.f, 0.f, 255.f));
+     }
+ 
+     out_uv_coords.resize(nf);
+@@ -213,8 +227,8 @@ static bool build_multi_texture_atlas(
+         bool use_solid = false;
+         if (tex_idx >= 0) {
+             y_off = y_offsets[tex_idx];
+-            th    = decoded[tex_idx].rows;
+-            tw    = decoded[tex_idx].cols;
++            th    = decoded[tex_idx].height;
++            tw    = decoded[tex_idx].width;
+         } else if (mat_idx >= 0 && mat_solid_y.count(mat_idx) > 0) {
+             y_off     = mat_solid_y[mat_idx];
+             th        = 1;
+@@ -227,8 +241,8 @@ static bool build_multi_texture_atlas(
+             // remapping below, no longer aliases onto the zero-padded right
+             // margin even when sub-textures have unequal widths.
+             y_off = y_offsets[first_usable_tex];
+-            th    = decoded[first_usable_tex].rows;
+-            tw    = decoded[first_usable_tex].cols;
++            th    = decoded[first_usable_tex].height;
++            tw    = decoded[first_usable_tex].width;
+         }
+ 
+         out_uv_coords[fi].resize(3);
+@@ -280,7 +294,7 @@ bool texture_to_painting(
+     if (textured.vertices.empty() || textured.indices.empty() || textured.textures.empty())
+         return false;
+ 
+-    cv::Mat texture;
++    tex2color::RGBImage texture;
+     tex2color::TriMesh input_mesh;
+     std::vector<std::vector<Vec2f>> uv_coords;
+ 
+@@ -588,28 +602,20 @@ bool decode_texture_to_pixels(
+     std::vector<unsigned char>& out_pixels,
+     int& out_w, int& out_h)
+ {
+-    cv::Mat decoded = decode_texture_image(img);
++    tex2color::RGBImage decoded = decode_texture_image(img);
+     if (decoded.empty())
+         return false;
+ 
+-    // decoded is BGR, CV_8UC3
+-    out_w = decoded.cols;
+-    out_h = decoded.rows;
+-    size_t nbytes = (size_t)out_w * out_h * 3;
+-    out_pixels.resize(nbytes);
+-
+-    if (decoded.isContinuous()) {
+-        std::memcpy(out_pixels.data(), decoded.data, nbytes);
+-    } else {
+-        for (int r = 0; r < out_h; ++r)
+-            std::memcpy(out_pixels.data() + r * out_w * 3, decoded.ptr(r), out_w * 3);
+-    }
++    // Pixels remain BGR for callers of the existing interface.
++    out_w = decoded.width;
++    out_h = decoded.height;
++    out_pixels = std::move(decoded.pixels);
+     return true;
+ }
+ 
+ // Sample face color from texture using 3 explicit UV values (centroid + bilinear).
+ static std::array<std::size_t,3> sample_face_from_uvs(
+-    const cv::Mat& tex,
++    const tex2color::RGBImage& tex,
+     const std::array<float,2>& uv0,
+     const std::array<float,2>& uv1,
+     const std::array<float,2>& uv2)
+@@ -620,20 +626,19 @@ static std::array<std::size_t,3> sample_face_from_uvs(
+     cu = cu - std::floor(cu);
+     cv_val = cv_val - std::floor(cv_val);
+ 
+-    float fx = cu * (tex.cols - 1);
+-    float fy = cv_val * (tex.rows - 1);
++    float fx = cu * (tex.width - 1);
++    float fy = cv_val * (tex.height - 1);
+ 
+-    int x0 = std::clamp(static_cast<int>(fx), 0, tex.cols - 1);
+-    int y0 = std::clamp(static_cast<int>(fy), 0, tex.rows - 1);
+-    int x1 = std::min(x0 + 1, tex.cols - 1);
+-    int y1 = std::min(y0 + 1, tex.rows - 1);
++    int x0 = std::clamp(static_cast<int>(fx), 0, tex.width - 1);
++    int y0 = std::clamp(static_cast<int>(fy), 0, tex.height - 1);
++    int x1 = std::min(x0 + 1, tex.width - 1);
++    int y1 = std::min(y0 + 1, tex.height - 1);
+ 
+     float wx = fx - x0;
+     float wy = fy - y0;
+ 
+-    const int ch = tex.channels();
+     auto sample = [&](int row, int col) -> std::array<float,3> {
+-        const uchar* ptr = tex.data + row * tex.step[0] + col * ch;
++        const auto* ptr = tex.pixel(row, col);
+         return {static_cast<float>(ptr[2]), static_cast<float>(ptr[1]), static_cast<float>(ptr[0])};
+     };
+ 
+@@ -653,7 +658,7 @@ static std::array<std::size_t,3> sample_face_from_uvs(
+ 
+ // Legacy overload: look up UVs from per-vertex array by vertex indices.
+ static std::array<std::size_t,3> sample_face_from_texture(
+-    const cv::Mat& tex,
++    const tex2color::RGBImage& tex,
+     const std::vector<std::array<float,2>>& uvs,
+     const std::array<int,3>& face)
+ {
+@@ -672,7 +677,7 @@ bool sample_original_face_colors(
+         return false;
+ 
+     // Decode all textures up front
+-    std::vector<cv::Mat> decoded_textures;
++    std::vector<tex2color::RGBImage> decoded_textures;
+     decoded_textures.reserve(textured.textures.size());
+     for (const auto& ti : textured.textures) {
+         decoded_textures.push_back(decode_texture_image(ti));
+diff --git a/src/libslic3r/TextureToColor/TextureToColor.cpp b/src/libslic3r/TextureToColor/TextureToColor.cpp
+index e5dde367..36e812a0 100644
+--- a/src/libslic3r/TextureToColor/TextureToColor.cpp
++++ b/src/libslic3r/TextureToColor/TextureToColor.cpp
+@@ -184,25 +184,24 @@ static bool ensure_all_cluster_centers_used(const std::vector<RGB>& source_face_
+ }
+ 
+ // Bilinear interpolation texture sampling; sub-pixel precision avoids nearest-neighbor aliasing
+-static RGB get_pixel_color(float u, float v, const cv::Mat& texture) {
++static RGB get_pixel_color(float u, float v, const RGBImage& texture) {
+     u = u - std::floor(u);
+     v = v - std::floor(v);
+ 
+     // glTF UV convention: (0,0) = top-left, v increases downward
+-    float fx = u * (texture.cols - 1);
+-    float fy = v * (texture.rows - 1);
++    float fx = u * (texture.width - 1);
++    float fy = v * (texture.height - 1);
+ 
+-    int x0 = std::clamp(static_cast<int>(fx), 0, texture.cols - 1);
+-    int y0 = std::clamp(static_cast<int>(fy), 0, texture.rows - 1);
+-    int x1 = std::min(x0 + 1, texture.cols - 1);
+-    int y1 = std::min(y0 + 1, texture.rows - 1);
++    int x0 = std::clamp(static_cast<int>(fx), 0, texture.width - 1);
++    int y0 = std::clamp(static_cast<int>(fy), 0, texture.height - 1);
++    int x1 = std::min(x0 + 1, texture.width - 1);
++    int y1 = std::min(y0 + 1, texture.height - 1);
+ 
+     float wx = fx - x0;
+     float wy = fy - y0;
+ 
+-    const int ch = texture.channels();
+     auto sample = [&](int row, int col) -> std::array<float, 3> {
+-        const uchar* ptr = texture.data + row * texture.step[0] + col * ch;
++        const auto* ptr = texture.pixel(row, col);
+         return {static_cast<float>(ptr[2]), static_cast<float>(ptr[1]), static_cast<float>(ptr[0])};
+     };
+ 
+@@ -244,7 +243,7 @@ static_assert(
+ 
+ // Multi-point Gaussian quadrature sampling on a single face; returns weighted average color.
+ // GAUSS_TRI_WEIGHT sums to 1.0 (Hammer quadrature formula), no normalization needed.
+-static RGB sample_face_color(const std::array<Vec2f, 3>& uvs, const cv::Mat& texture) {
++static RGB sample_face_color(const std::array<Vec2f, 3>& uvs, const RGBImage& texture) {
+     float r = 0.0f, g = 0.0f, b = 0.0f;
+     for (int k = 0; k < 7; ++k) {
+         float u = GAUSS_TRI_BARY[k][0] * uvs[0].x() + GAUSS_TRI_BARY[k][1] * uvs[1].x() + GAUSS_TRI_BARY[k][2] * uvs[2].x();
+@@ -784,7 +783,7 @@ static bool repair_cluster_smooth(
+     return true;
+ }
+ 
+-bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& texture_mesh_uv_coords, const cv::Mat& texture, TriMesh& color_mesh,
++bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& texture_mesh_uv_coords, const RGBImage& texture, TriMesh& color_mesh,
+                     std::vector<std::array<std::size_t, 3>>& face_colors, const TextureToColorSettings& settings, AlgoProgressCallback progress_callback,
+                     AlgoCancelCallback cancel_callback) {
+     auto report = [&](int pct, const char* msg) {
+@@ -820,8 +819,8 @@ bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<V
+         BOOST_LOG_TRIVIAL(debug) << "TextureToColor: texture is empty.";
+         return false;
+     }
+-    if (texture.channels() < 3) {
+-        BOOST_LOG_TRIVIAL(debug) << "TextureToColor: texture must have at least 3 channels, got " << texture.channels();
++    if (texture.pixels.size() != std::size_t(texture.width) * texture.height * 3) {
++        BOOST_LOG_TRIVIAL(debug) << "TextureToColor: texture pixels do not match image dimensions.";
+         return false;
+     }
+     if (texture_mesh_uv_coords.size() != texture_mesh.indices.size()) {
+diff --git a/src/libslic3r/TextureToColor/TextureToColor.hpp b/src/libslic3r/TextureToColor/TextureToColor.hpp
+index 019a113f..3e1a27ff 100644
+--- a/src/libslic3r/TextureToColor/TextureToColor.hpp
++++ b/src/libslic3r/TextureToColor/TextureToColor.hpp
+@@ -1,8 +1,8 @@
+ #pragma once
+ 
+ #include "Callbacks.hpp"
++#include "RGBImage.hpp"
+ #include "TriMesh.hpp"
+-#include "opencv2/core.hpp"
+ #include <functional>
+ #include <string>
+ 
+@@ -57,7 +57,7 @@ struct TextureToColorSettings {
+  * @param[in]      cancel_callback    取消回调函数
+  * @return 成功返回true, 输入数据无效(空网格、无UV、空纹理等)返回false
+  */
+-bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& uv_coords, const cv::Mat& texture, TriMesh& color_mesh,
++bool TextureToColor(const TriMesh& texture_mesh, const std::vector<std::vector<Vec2f>>& uv_coords, const RGBImage& texture, TriMesh& color_mesh,
+                     std::vector<std::array<std::size_t, 3>>& face_colors, const TextureToColorSettings& settings = TextureToColorSettings(),
+                     AlgoProgressCallback progress_callback = nullptr, AlgoCancelCallback cancel_callback = nullptr);
+ 
 diff --git a/src/libslic3r/utils.cpp b/src/libslic3r/utils.cpp
 index 58ec8318..f9260ec1 100644
 --- a/src/libslic3r/utils.cpp
@@ -646,10 +1412,19 @@ index 58ec8318..f9260ec1 100644
  	if (ec) {
  		error_message = ec.message();
 diff --git a/src/slic3r/CMakeLists.txt b/src/slic3r/CMakeLists.txt
-index 1cd8af13..61376e7c 100644
+index 1cd8af13..edb45877 100644
 --- a/src/slic3r/CMakeLists.txt
 +++ b/src/slic3r/CMakeLists.txt
-@@ -947,9 +947,9 @@ if (UNIX AND NOT APPLE)
+@@ -469,6 +469,8 @@ set(SLIC3R_GUI_SOURCES
+     GUI/PartSkipDialog.hpp
+     GUI/SkipPartCanvas.cpp
+     GUI/SkipPartCanvas.hpp
++    GUI/SkipPartContours.cpp
++    GUI/SkipPartContours.hpp
+     GUI/Search.cpp
+     GUI/Search.hpp
+     GUI/Selection.cpp
+@@ -947,9 +949,9 @@ if (UNIX AND NOT APPLE)
      find_package(GTK${SLIC3R_GTK} REQUIRED)
      pkg_check_modules(LIBSECRET REQUIRED libsecret-1)
      pkg_check_modules(webkit2gtk REQUIRED webkit2gtk-4.1)
@@ -1232,6 +2007,264 @@ index 83ec4695..0974675a 100644
  #endif
  
  namespace Slic3r {
+diff --git a/src/slic3r/GUI/SkipPartCanvas.cpp b/src/slic3r/GUI/SkipPartCanvas.cpp
+index 7b7db213..1c88160a 100644
+--- a/src/slic3r/GUI/SkipPartCanvas.cpp
++++ b/src/slic3r/GUI/SkipPartCanvas.cpp
+@@ -1,9 +1,7 @@
+ #include <glad/gl.h>
+ #include "SkipPartCanvas.hpp"
++#include "SkipPartContours.hpp"
+ 
+-#include <opencv2/opencv.hpp>
+-#include <opencv2/core.hpp>
+-#include <opencv2/imgproc.hpp>
+ #include <boost/log/trivial.hpp>
+ #include <boost/thread/mutex.hpp>
+ #include <boost/nowide/fstream.hpp>
+@@ -35,126 +33,43 @@ SkipPartCanvas::SkipPartCanvas(wxWindow *parent, const wxGLAttributes& dispAttrs
+ 
+ void SkipPartCanvas::LoadPickImage(const std::string & path)
+ {
+-    if(!std::filesystem::exists(path)) return;
+-
+-    auto ParseShapeId = [](cv::Mat image, const std::vector<std::vector<cv::Point>> &contours, const std::vector<cv::Vec4i> &hierarchy, int root_idx) -> uint32_t {
+-        cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC1);
+-
+-        cv::drawContours(mask, contours, root_idx, 255, cv::FILLED);
+-
+-        int child = hierarchy[root_idx][2];
+-        while (child != -1) {
+-            cv::drawContours(mask, contours, child, 0, cv::FILLED);
+-            child = hierarchy[child][0];
+-        }
+-        std::vector<cv::Vec3b> pixels;
+-        for (int y = 0; y < image.rows; ++y) {
+-            for (int x = 0; x < image.cols; ++x) {
+-                if (mask.at<uchar>(y, x)) { pixels.push_back(image.at<cv::Vec3b>(y, x)); }
+-            }
+-        }
+-
+-        std::map<cv::Vec3b, int, std::function<bool(const cv::Vec3b &, const cv::Vec3b &)>> colorCount(
+-            [](const cv::Vec3b &a, const cv::Vec3b &b) { return std::lexicographical_compare(a.val, a.val + 3, b.val, b.val + 3); });
+-
+-        for (auto &c : pixels) colorCount[c]++;
+-
+-        cv::Vec3b main_color;
+-        int       max_count   = 0;
+-        int       total_count = 0;
+-        for (const auto &kv : colorCount) {
+-            if (kv.second > max_count) {
+-                max_count  = kv.second;
+-                main_color = kv.first;
+-            }
+-            total_count += kv.second;
+-        }
+-
+-        SkipIdHelper helper{main_color[2], main_color[1], main_color[0]};
+-        helper.reverse();
+-        return (max_count * 2 > total_count) ? helper.value : 0;
+-    };
+-
+     parts_state_.clear();
+     parts_triangles_.clear();
+     pick_parts_.clear();
+     int preffered_w{FromDIP(400)}, preffered_h{FromDIP(400)};
+-    cv::Mat src_image = cv::imread(path, cv::IMREAD_UNCHANGED);
+-    cv::cvtColor(src_image, src_image, cv::COLOR_BGRA2BGR); // remove alpha
+-    float zoom_x{static_cast<float>(preffered_w) / src_image.cols};
+-    float zoom_y{static_cast<float>(preffered_h) / src_image.rows};
++    pick_image_ = wxImage(wxString::FromUTF8(path), wxBITMAP_TYPE_ANY);
++    if (!pick_image_.IsOk())
++        return;
++    float zoom_x{static_cast<float>(preffered_w) / pick_image_.GetWidth()};
++    float zoom_y{static_cast<float>(preffered_h) / pick_image_.GetHeight()};
+     float image_scale{0};
+     if (abs(zoom_x - 1) > abs(zoom_y - 1))
+         image_scale = zoom_x;
+     else
+         image_scale = zoom_y;
+     image_view_scale_ = 1 / image_scale;
+-    pick_image_ = src_image;
+-    std::vector<cv::Mat> channels;
+-    cv::Mat gray; // convert to gray
+-    cv::cvtColor(pick_image_, gray, cv::COLOR_BGR2GRAY);
+-    cv::Mat mask; // convery to binary
+-    cv::threshold(gray, mask, 0, 255, cv::THRESH_BINARY);
+-    std::vector<std::vector<cv::Point>> pick_counters;
+-    std::vector<cv::Vec4i>              hierarchy;
+-    cv::findContours(mask, pick_counters, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_TC89_KCOS);
+-    auto compute_depth = [&](int idx) {
+-        int depth = 0;
+-        while (hierarchy[idx][3] != -1) {
+-            depth++;
+-            idx = hierarchy[idx][3];
+-        }
+-        return depth;
+-    };
+-    for (int i = 0; i < pick_counters.size(); ++i) {
+-        int depth  = compute_depth(i);
+-        int parent = hierarchy[i][3];
+-        if (parent != -1) continue;
+-
+-        auto id = ParseShapeId(pick_image_, pick_counters, hierarchy, i);
+-        if (id > 0) {
+-            std::vector<FloatPoint>              flat_points;
+-            std::vector<std::vector<FloatPoint>> polygon;
+-
+-            // part body
+-            {
+-                polygon.emplace_back();
+-                for (const auto &pt : pick_counters[i]) {
+-                    FloatPoint fp{pt.x * 1.0f, pt.y * 1.0f};
+-                    polygon.back().push_back(fp);
+-                    flat_points.push_back(fp);
+-                }
+-                int child = hierarchy[i][2];
+-                while (child != -1) {
+-                    polygon.emplace_back();
+-                    for (const auto &pt : pick_counters[child]) {
+-                        FloatPoint fp{pt.x * 1.0f, pt.y * 1.0f};
+-                        polygon.back().push_back(fp);
+-                        flat_points.push_back(fp);
+-                    }
+-                    child = hierarchy[child][0];
+-                }
+-                std::vector<uint32_t>   indices = mapbox::earcut<uint32_t>(polygon);
+-                std::vector<FloatPoint> final_counter;
+-                for (size_t j = 0; j < indices.size(); j += 3) {
+-                    final_counter.push_back(flat_points[indices[j]]);
+-                    final_counter.push_back(flat_points[indices[j + 1]]);
+-                    final_counter.push_back(flat_points[indices[j + 2]]);
+-                }
+-
+-                parts_triangles_[id].emplace_back(final_counter);
++    for (const auto& component : extract_mask_components(
++             pick_image_.GetData(), pick_image_.GetWidth(), pick_image_.GetHeight())) {
++        std::vector<FloatPoint> flat_points;
++        std::vector<std::vector<FloatPoint>> polygon;
++        for (const auto& ring : component.rings) {
++            polygon.emplace_back();
++            std::vector<wxPoint> outline;
++            for (const auto& point : ring) {
++                FloatPoint fp{static_cast<float>(point.x), static_cast<float>(point.y)};
++                polygon.back().push_back(fp);
++                flat_points.push_back(fp);
++                outline.emplace_back(point.x, point.y);
+             }
+-            // part outlines
+-            {
+-                pick_parts_[id].emplace_back(pick_counters[i]);
+-                int child = hierarchy[i][2];
+-                while (child != -1) {
+-                    pick_parts_[id].emplace_back(pick_counters[child]);
+-                    child = hierarchy[child][0];
+-                }
+-            }
+-            if (parts_state_.find(id) == parts_state_.end()) parts_state_.emplace(id, psUnCheck);
++            pick_parts_[component.id].push_back(std::move(outline));
+         }
++        const std::vector<uint32_t> indices = mapbox::earcut<uint32_t>(polygon);
++        std::vector<FloatPoint> triangles;
++        triangles.reserve(indices.size());
++        for (uint32_t index : indices)
++            triangles.push_back(flat_points[index]);
++        parts_triangles_[component.id].push_back(std::move(triangles));
++        parts_state_.emplace(component.id, psUnCheck);
+     }
+ }
+ 
+@@ -407,13 +322,11 @@ inline wxPoint SkipPartCanvas::ViewPtToImagePt(const wxPoint& view_pt) const
+ 
+ uint32_t SkipPartCanvas::GetIdAtImagePt(const wxPoint& image_pt) const
+ {
+-    if (image_pt.x >= 0 && image_pt.x < pick_image_.cols
+-        && image_pt.y >= 0 && image_pt.y < pick_image_.rows) {
+-        // at(row, col)=>at(y, x)
+-        cv::Vec3b bgr = pick_image_.at<cv::Vec3b>(image_pt.y, image_pt.x);
+-        SkipIdHelper helper{bgr[2], bgr[1], bgr[0]};
+-        helper.reverse();
+-        return helper.value;
++    if (pick_image_.IsOk() && image_pt.x >= 0 && image_pt.x < pick_image_.GetWidth()
++        && image_pt.y >= 0 && image_pt.y < pick_image_.GetHeight()) {
++        const auto* rgb = pick_image_.GetData()
++            + 3 * (std::size_t(image_pt.y) * pick_image_.GetWidth() + image_pt.x);
++        return std::uint32_t(rgb[0]) | (std::uint32_t(rgb[1]) << 8) | (std::uint32_t(rgb[2]) << 16);
+     } else {
+         return 0;
+     }
+@@ -694,4 +607,4 @@ void ModelSettingHelper::DataHandler(const XML_Char *s, int len)
+     // do nothing
+ }
+ }
+-}
+\ No newline at end of file
++}
+diff --git a/src/slic3r/GUI/SkipPartCanvas.hpp b/src/slic3r/GUI/SkipPartCanvas.hpp
+index d70ad371..c0327ba9 100644
+--- a/src/slic3r/GUI/SkipPartCanvas.hpp
++++ b/src/slic3r/GUI/SkipPartCanvas.hpp
+@@ -2,7 +2,7 @@
+ #define SKIPPARTCANVAS_H
+ #include <wx/wx.h>
+ #include <wx/glcanvas.h>
+-#include <opencv2/opencv.hpp>
++#include <wx/image.h>
+ #include <wx/textctrl.h>
+ #include <vector>
+ #include <expat.h>
+@@ -29,32 +29,6 @@ struct ObjectInfo {
+ 
+ class SkipPartCanvas : public wxGLCanvas
+ {
+-    union SkipIdHelper
+-    {
+-        uint32_t value = 0;
+-
+-        struct
+-        {
+-            uint8_t b;
+-            uint8_t g;
+-            uint8_t r;
+-            uint8_t _padding;
+-        };
+-
+-        uint8_t bytes[4];
+-
+-        SkipIdHelper() = default;
+-
+-        SkipIdHelper(uint8_t red, uint8_t green, uint8_t blue)
+-            : r(red), g(green), b(blue), _padding(0) {}
+-
+-        SkipIdHelper(uint32_t val): value(val){}
+-        void reverse() {
+-            uint8_t tmp{r};
+-            r = b;
+-            b = tmp;
+-        }
+-    };
+ public:
+     SkipPartCanvas(wxWindow *parent, const wxGLAttributes& dispAttrs);
+     ~SkipPartCanvas() = default;
+@@ -83,9 +57,9 @@ protected:
+     void OnMouseWheel(wxMouseEvent& event);
+ private:
+     wxGLContext* context_;
+-    cv::Mat pick_image_;
++    wxImage pick_image_;
+     std::unordered_map < uint32_t, std::vector<std::vector<FloatPoint>>> parts_triangles_;
+-    std::unordered_map < uint32_t, std::vector<std::vector<cv::Point>>> pick_parts_;
++    std::unordered_map < uint32_t, std::vector<std::vector<wxPoint>>> pick_parts_;
+     std::unordered_map<uint32_t, PartState> parts_state_;
+     int zoom_percent_{100};
+     wxPoint offset_{0,0};
+@@ -165,4 +139,4 @@ private:
+ 
+ }
+ }
+-#endif //SKIPPARTCANVAS_H
+\ No newline at end of file
++#endif //SKIPPARTCANVAS_H
 diff --git a/src/slic3r/GUI/StatusPanel.cpp b/src/slic3r/GUI/StatusPanel.cpp
 index f7bd41fe..464fb2ea 100644
 --- a/src/slic3r/GUI/StatusPanel.cpp
@@ -1247,6 +2280,75 @@ index f7bd41fe..464fb2ea 100644
      printingstage_vertical_sizer->Add(m_printing_stage_underline, 0, wxEXPAND, 0);
      m_printing_stage_panel->SetSizer(printingstage_vertical_sizer);
  
+diff --git a/src/slic3r/GUI/TextureImportDialog.cpp b/src/slic3r/GUI/TextureImportDialog.cpp
+index 1a24799a..202270a9 100644
+--- a/src/slic3r/GUI/TextureImportDialog.cpp
++++ b/src/slic3r/GUI/TextureImportDialog.cpp
+@@ -20,6 +20,8 @@
+ #include <wx/dcbuffer.h>
+ #include <wx/display.h>
+ #include <wx/evtloop.h>
++#include <wx/image.h>
++#include <wx/mstream.h>
+ #include <wx/statline.h>
+ #include <wx/scrolwin.h>
+ #include <wx/msgdlg.h>
+@@ -43,6 +45,46 @@ static constexpr const char* DEFAULT_VIRTUAL_FILAMENT_NAME       = "Bambu PLA Ba
+ 
+ static bool is_dark() { return Slic3r::GUI::wxGetApp().dark_mode(); }
+ 
++// PNG and JPEG are decoded by libslic3r. Use wx's existing image handlers for
++// other OBJ/Assimp textures so removing OpenCV does not discard those formats.
++static void decode_other_texture_formats(Slic3r::TexturedMesh& mesh)
++{
++    static constexpr unsigned char png_signature[] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
++    for (auto& texture : mesh.textures) {
++        if ((texture.width > 0 && texture.height > 0) || texture.data.size() < 3)
++            continue;
++        const auto& encoded = texture.data;
++        if ((encoded.size() >= sizeof(png_signature) && std::memcmp(encoded.data(), png_signature, sizeof(png_signature)) == 0)
++            || (encoded[0] == 0xff && encoded[1] == 0xd8))
++            continue;
++
++        wxMemoryInputStream stream(encoded.data(), encoded.size());
++        wxImage image(stream, wxBITMAP_TYPE_ANY);
++        if (!image.IsOk() || !image.GetData())
++            continue;
++        const int width = image.GetWidth();
++        const int height = image.GetHeight();
++        const int channels = image.HasAlpha() ? 4 : 3;
++        if (width <= 0 || height <= 0
++            || std::size_t(width) > std::numeric_limits<std::size_t>::max() / std::size_t(height) / channels)
++            continue;
++
++        const std::size_t count = std::size_t(width) * height;
++        std::vector<unsigned char> raw(count * channels);
++        const unsigned char* rgb = image.GetData();
++        const unsigned char* alpha = image.HasAlpha() ? image.GetAlpha() : nullptr;
++        for (std::size_t i = 0; i < count; ++i) {
++            std::memcpy(raw.data() + i * channels, rgb + i * 3, 3);
++            if (alpha)
++                raw[i * channels + 3] = alpha[i];
++        }
++        texture.width = width;
++        texture.height = height;
++        texture.channels = channels;
++        texture.data = std::move(raw);
++    }
++}
++
+ static wxColour texture_import_gray9000()
+ {
+     return wxColour(38, 46, 48);
+@@ -1775,6 +1817,8 @@ TextureImportDialog::TextureImportDialog(
+     CenterOnParent();
+     wxGetApp().UpdateDlgDarkUI(this);
+ 
++    decode_other_texture_formats(m_textured_mesh);
++
+     m_preview_canvas->set_mesh_data(m_textured_mesh.vertices, m_textured_mesh.indices);
+ 
+     // Pre-computed face colors (OBJ vertex colors / MTL face colors):
 diff --git a/src/slic3r/GUI/WebDownPluginDlg.cpp b/src/slic3r/GUI/WebDownPluginDlg.cpp
 index dca17110..16150357 100644
 --- a/src/slic3r/GUI/WebDownPluginDlg.cpp
@@ -1712,39 +2814,150 @@ index 3d180c2f..45b4bda3 100644
  
          // Set Python home - this is the prefix where Python libraries are located
          PyConfig config;
-diff --git a/src/libslic3r/BoostProcess.hpp b/src/libslic3r/BoostProcess.hpp
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index c403152c..38d64195 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -85,4 +85,22 @@ add_subdirectory(fff_print)
+ add_subdirectory(sla_print)
+ add_subdirectory(filament_group)
+ 
++add_executable(skip_part_contours_test
++    SkipPartContoursTest.cpp
++    ${PROJECT_SOURCE_DIR}/src/slic3r/GUI/SkipPartContours.cpp)
++target_include_directories(skip_part_contours_test PRIVATE
++    ${PROJECT_SOURCE_DIR}/src
++    ${PROJECT_SOURCE_DIR}/deps_src)
++add_test(NAME skip_part_contours COMMAND skip_part_contours_test)
+ 
++add_executable(texture_decode_test
++    TextureDecodeTest.c
++    ${PROJECT_SOURCE_DIR}/src/libslic3r/TextureToColor/TextureDecode.c)
++target_include_directories(texture_decode_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
++target_link_libraries(texture_decode_test PRIVATE PNG::PNG JPEG::JPEG)
++add_test(NAME texture_decode COMMAND texture_decode_test)
++
++add_executable(obj_color_utils_test ObjColorUtilsTest.cpp)
++target_include_directories(obj_color_utils_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
++target_link_libraries(obj_color_utils_test PRIVATE libslic3r)
++add_test(NAME obj_color_utils COMMAND obj_color_utils_test)
+diff --git a/BUILD_FREEBSD.md b/BUILD_FREEBSD.md
 new file mode 100644
-index 00000000..08344d91
+index 00000000..665e84bd
 --- /dev/null
-+++ b/src/libslic3r/BoostProcess.hpp
-@@ -0,0 +1,27 @@
-+#ifndef slic3r_BoostProcess_hpp_
-+#define slic3r_BoostProcess_hpp_
++++ b/BUILD_FREEBSD.md
+@@ -0,0 +1,111 @@
++# Building OrcaCubic on FreeBSD
 +
-+// Boost 1.88 changed <boost/process.hpp> to expose Process v2. OrcaCubic
-+// currently uses the v1 API, which remains available under its explicit
-+// compatibility header in newer Boost releases.
-+#include <boost/version.hpp>
++This is a native system-library build for FreeBSD 13.5 or later. It has been
++verified with Clang 19, CMake 3.31, Ninja 1.13, wxWidgets 3.2/GTK3, Boost 1.89,
++OpenCASCADE 7.9, and Python 3.11.
 +
-+#if BOOST_VERSION >= 108800
-+    // The v1 headers otherwise expose their API only in boost::process::v1.
-+    // Keep the namespace used by OrcaCubic's existing call sites while v1 is
-+    // still supplied as a Boost compatibility interface.
-+    #ifndef BOOST_PROCESS_VERSION
-+        #define BOOST_PROCESS_VERSION 1
-+    #endif
-+    #include <boost/process/v1.hpp>
-+    #ifdef _WIN32
-+        #include <boost/process/v1/windows.hpp>
-+    #endif
-+#else
-+    #include <boost/process.hpp>
-+    #ifdef _WIN32
-+        #include <boost/process/windows.hpp>
-+    #endif
-+#endif
++## Dependencies
 +
-+#endif
++Install the development packages through FreeBSD packages or ports. The tested
++package set includes:
++
++```sh
++pkg install cmake ninja llvm19 boost-libs python311 wx32-gtk3 openvdb \
++    cgal eigen libnoise hidapi libsecret webkit2-gtk_41 glfw glew assimp \
++    nlopt onetbb gmp mpfr curl
++```
++
++Additional GUI/media dependencies are pulled in by wxWidgets and WebKitGTK on
++the tested package set. `wxInspector` is not packaged on FreeBSD: the build
++downloads OrcaCubic's pinned v1.0.0 source archive and applies the tracked
++wxWidgets 3.2 compatibility patch. Nothing is installed outside the build
++directory.
++
++FreeBSD uses the selected system Python development runtime rather than the
++Windows/macOS bundled Python distribution. No `pip` packages are required for
++the bundled Kobra X LAN bridge. The plugin loader recognizes FreeBSD native
++wheel platform tags for the selected Python ABI; third-party plugin
++compatibility still depends on the plugin and its available wheels.
++Installing a plugin's extra Python packages requires `uv`; this tested host
++does not have it. That optional feature can be enabled by configuring with
++`-DORCA_BUNDLED_UV_EXECUTABLE=/path/to/uv` after obtaining a FreeBSD-compatible
++`uv` executable. The Kobra X bridge and native slicer build do not need `uv`.
++
++The bridge's token-file handling, local HTTP authentication, signed HTTP/AES
++key exchange, MQTT credential/setup and connection status, and HTTP
++upload/MQTT start-message formatting have loopback-only or mocked regression
++tests that do not contact a printer.
++The mock upload rejection test also verifies that no start message is
++published after a rejected upload:
++
++```sh
++env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
++    resources/scripts/tests/test_anycubic_bridge.py -v
++```
++
++The bridge can be smoke-tested without a printer by running it with a
++loopback-only address and a disposable token, then requesting
++`http://127.0.0.1:18988/health` from another terminal. An unauthenticated
++request to `/status` should return HTTP 403. Stop the bridge after the test;
++this checks Python startup and local authentication, not a Kobra X connection.
++The GUI launcher instead creates an owner-only token file in its data directory
++and passes its path to the bridge, so the live token does not appear in the
++bridge command line. Keep that data directory private.
++
++```sh
++env PYTHONDONTWRITEBYTECODE=1 ORCACUBIC_BRIDGE_TOKEN=local-smoke-only \
++    python3 resources/scripts/anycubic_lan_daemon.py 127.0.0.1
++# In another terminal while the bridge is running:
++curl http://127.0.0.1:18988/health
++```
++
++## Configure and build
++
++Use an out-of-source build:
++
++```sh
++cmake -S . -B build-freebsd -G Ninja \
++    -DCMAKE_BUILD_TYPE=Release \
++    -DSLIC3R_STATIC=OFF \
++    -DSLIC3R_GUI=ON \
++    -DSLIC3R_GTK=3 \
++    -DOPENVDB_FIND_MODULE_PATH=/usr/local/lib/cmake/OpenVDB \
++    -DBUILD_TESTS=OFF -Wno-dev
++cmake --build build-freebsd --target OrcaSlicer --parallel 4
++```
++
++The resulting executable is `build-freebsd/src/orca-slicer`. It dynamically
++links against system libraries, including the FreeBSD Python runtime. Before
++using existing profiles, first start it in a graphical session with a separate
++data directory:
++
++```sh
++build-freebsd/src/orca-slicer --datadir /path/to/empty-orcacubic-data
++```
++
++With the default install prefix, `cmake --install build-freebsd` stages the
++application and resources privately under `build-freebsd/OrcaSlicer/`; it does
++not install a FreeBSD package or replace system libraries. The staged GUI can
++be started as `build-freebsd/OrcaSlicer/bin/orca-slicer --datadir
++/path/to/empty-orcacubic-data`. This staged layout was tested on FreeBSD 13.5.
++
++Do not point this initial run at an existing OrcaSlicer or Cura configuration.
++Once the GUI starts, use its import workflow to copy profiles rather than
++moving or overwriting source profiles. OrcaSlicer user preset `.json` and
++`.info` pairs can also be copied into the new data directory's
++`user/default/<preset-type>/` folder after the corresponding system printer
++has been enabled. Keep Cura configurations separate: Cura's `.cfg` format is
++not directly importable as an OrcaCubic preset.
++
++## Current validation boundary
++
++The native binary builds and launches its GUI on FreeBSD 13.5/GTK3. A copied
++OrcaSlicer filament preset and locally converted Cura printer/process/filament
++presets were loaded and selected with an isolated `--datadir`; a small model
++also sliced successfully through the command-line path. With a loopback-only
++Kobra X test profile, the GUI launched and stopped the bundled Python bridge
++correctly. These tests do not establish physical print safety. A full GUI
++slice, Kobra X LAN handshake, OctoPrint connection, and printer-side
++validation remain pending. In particular, do not send command-line test
++G-code to a printer unless the full machine profile and its inherited
++settings were loaded and reviewed.
 diff --git a/resources/scripts/tests/test_anycubic_bridge.py b/resources/scripts/tests/test_anycubic_bridge.py
 new file mode 100644
 index 00000000..49132f70
@@ -2029,120 +3242,820 @@ index 00000000..49132f70
 +
 +if __name__ == "__main__":
 +    unittest.main()
-diff --git a/BUILD_FREEBSD.md b/BUILD_FREEBSD.md
+diff --git a/src/libslic3r/BoostProcess.hpp b/src/libslic3r/BoostProcess.hpp
 new file mode 100644
-index 00000000..e8ead8d8
+index 00000000..08344d91
 --- /dev/null
-+++ b/BUILD_FREEBSD.md
-@@ -0,0 +1,111 @@
-+# Building OrcaCubic on FreeBSD
++++ b/src/libslic3r/BoostProcess.hpp
+@@ -0,0 +1,27 @@
++#ifndef slic3r_BoostProcess_hpp_
++#define slic3r_BoostProcess_hpp_
 +
-+This is a native system-library build for FreeBSD 13.5 or later. It has been
-+verified with Clang 19, CMake 3.31, Ninja 1.13, wxWidgets 3.2/GTK3, Boost 1.89,
-+OpenCASCADE 7.9, and Python 3.11.
++// Boost 1.88 changed <boost/process.hpp> to expose Process v2. OrcaCubic
++// currently uses the v1 API, which remains available under its explicit
++// compatibility header in newer Boost releases.
++#include <boost/version.hpp>
 +
-+## Dependencies
++#if BOOST_VERSION >= 108800
++    // The v1 headers otherwise expose their API only in boost::process::v1.
++    // Keep the namespace used by OrcaCubic's existing call sites while v1 is
++    // still supplied as a Boost compatibility interface.
++    #ifndef BOOST_PROCESS_VERSION
++        #define BOOST_PROCESS_VERSION 1
++    #endif
++    #include <boost/process/v1.hpp>
++    #ifdef _WIN32
++        #include <boost/process/v1/windows.hpp>
++    #endif
++#else
++    #include <boost/process.hpp>
++    #ifdef _WIN32
++        #include <boost/process/windows.hpp>
++    #endif
++#endif
 +
-+Install the development packages through FreeBSD packages or ports. The tested
-+package set includes:
++#endif
+diff --git a/src/libslic3r/TextureToColor/RGBImage.hpp b/src/libslic3r/TextureToColor/RGBImage.hpp
+new file mode 100644
+index 00000000..626f1e3c
+--- /dev/null
++++ b/src/libslic3r/TextureToColor/RGBImage.hpp
+@@ -0,0 +1,29 @@
++#pragma once
 +
-+```sh
-+pkg install cmake ninja llvm19 boost-libs python311 wx32-gtk3 opencv openvdb \
-+    cgal eigen libnoise hidapi libsecret webkit2-gtk_41 glfw glew assimp \
-+    nlopt onetbb gmp mpfr curl
-+```
++#include <cstddef>
++#include <cstdint>
++#include <vector>
 +
-+Additional GUI/media dependencies are pulled in by wxWidgets and WebKitGTK on
-+the tested package set. `wxInspector` is not packaged on FreeBSD: the build
-+downloads OrcaCubic's pinned v1.0.0 source archive and applies the tracked
-+wxWidgets 3.2 compatibility patch. Nothing is installed outside the build
-+directory.
++namespace Slic3r::tex2color {
 +
-+FreeBSD uses the selected system Python development runtime rather than the
-+Windows/macOS bundled Python distribution. No `pip` packages are required for
-+the bundled Kobra X LAN bridge. The plugin loader recognizes FreeBSD native
-+wheel platform tags for the selected Python ABI; third-party plugin
-+compatibility still depends on the plugin and its available wheels.
-+Installing a plugin's extra Python packages requires `uv`; this tested host
-+does not have it. That optional feature can be enabled by configuring with
-+`-DORCA_BUNDLED_UV_EXECUTABLE=/path/to/uv` after obtaining a FreeBSD-compatible
-+`uv` executable. The Kobra X bridge and native slicer build do not need `uv`.
++// Three-byte BGR image, stored top-down with no row padding. Keeping the
++// channel order matches the texture sampling code and the old OpenCV path.
++struct RGBImage {
++    int width = 0;
++    int height = 0;
++    std::vector<std::uint8_t> pixels;
 +
-+The bridge's token-file handling, local HTTP authentication, signed HTTP/AES
-+key exchange, MQTT credential/setup and connection status, and HTTP
-+upload/MQTT start-message formatting have loopback-only or mocked regression
-+tests that do not contact a printer.
-+The mock upload rejection test also verifies that no start message is
-+published after a rejected upload:
++    RGBImage() = default;
++    RGBImage(int w, int h) : width(w), height(h), pixels(std::size_t(w) * h * 3, 0) {}
 +
-+```sh
-+env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest \
-+    resources/scripts/tests/test_anycubic_bridge.py -v
-+```
++    bool empty() const { return width <= 0 || height <= 0 || pixels.empty(); }
 +
-+The bridge can be smoke-tested without a printer by running it with a
-+loopback-only address and a disposable token, then requesting
-+`http://127.0.0.1:18988/health` from another terminal. An unauthenticated
-+request to `/status` should return HTTP 403. Stop the bridge after the test;
-+this checks Python startup and local authentication, not a Kobra X connection.
-+The GUI launcher instead creates an owner-only token file in its data directory
-+and passes its path to the bridge, so the live token does not appear in the
-+bridge command line. Keep that data directory private.
++    std::uint8_t* pixel(int row, int col) {
++        return pixels.data() + (std::size_t(row) * width + col) * 3;
++    }
++    const std::uint8_t* pixel(int row, int col) const {
++        return pixels.data() + (std::size_t(row) * width + col) * 3;
++    }
++};
 +
-+```sh
-+env PYTHONDONTWRITEBYTECODE=1 ORCACUBIC_BRIDGE_TOKEN=local-smoke-only \
-+    python3 resources/scripts/anycubic_lan_daemon.py 127.0.0.1
-+# In another terminal while the bridge is running:
-+curl http://127.0.0.1:18988/health
-+```
++} // namespace Slic3r::tex2color
+diff --git a/src/libslic3r/TextureToColor/TextureDecode.c b/src/libslic3r/TextureToColor/TextureDecode.c
+new file mode 100644
+index 00000000..f5c0d53f
+--- /dev/null
++++ b/src/libslic3r/TextureToColor/TextureDecode.c
+@@ -0,0 +1,140 @@
++#include "TextureDecode.h"
 +
-+## Configure and build
++#include <stdio.h>
++#include <jpeglib.h>
++#include <png.h>
 +
-+Use an out-of-source build:
++#include <limits.h>
++#include <setjmp.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
 +
-+```sh
-+cmake -S . -B build-freebsd -G Ninja \
-+    -DCMAKE_BUILD_TYPE=Release \
-+    -DSLIC3R_STATIC=OFF \
-+    -DSLIC3R_GUI=ON \
-+    -DSLIC3R_GTK=3 \
-+    -DOPENVDB_FIND_MODULE_PATH=/usr/local/lib/cmake/OpenVDB \
-+    -DBUILD_TESTS=OFF -Wno-dev
-+cmake --build build-freebsd --target OrcaSlicer --parallel 4
-+```
++struct jpeg_error_context {
++    struct jpeg_error_mgr manager;
++    jmp_buf recovery;
++};
 +
-+The resulting executable is `build-freebsd/src/orca-slicer`. It dynamically
-+links against system libraries, including the FreeBSD Python runtime. Before
-+using existing profiles, first start it in a graphical session with a separate
-+data directory:
++static void jpeg_error_exit(j_common_ptr info)
++{
++    struct jpeg_error_context* context = (struct jpeg_error_context*)info->err;
++    longjmp(context->recovery, 1);
++}
 +
-+```sh
-+build-freebsd/src/orca-slicer --datadir /path/to/empty-orcacubic-data
-+```
++static int valid_dimensions(size_t width, size_t height)
++{
++    return width > 0 && height > 0 && width <= INT_MAX && height <= INT_MAX
++        && width <= SIZE_MAX / height / 3;
++}
 +
-+With the default install prefix, `cmake --install build-freebsd` stages the
-+application and resources privately under `build-freebsd/OrcaSlicer/`; it does
-+not install a FreeBSD package or replace system libraries. The staged GUI can
-+be started as `build-freebsd/OrcaSlicer/bin/orca-slicer --datadir
-+/path/to/empty-orcacubic-data`. This staged layout was tested on FreeBSD 13.5.
++static int decode_png(const unsigned char* data, size_t size, TextureDecodedRGB* output)
++{
++    png_image image;
++    memset(&image, 0, sizeof(image));
++    image.version = PNG_IMAGE_VERSION;
++    if (!png_image_begin_read_from_memory(&image, data, size))
++        return 0;
++    image.format = PNG_FORMAT_RGBA;
++    if (!valid_dimensions(image.width, image.height)
++        || (size_t)image.width > SIZE_MAX / image.height / 4) {
++        png_image_free(&image);
++        return 0;
++    }
++    const size_t pixel_count = (size_t)image.width * image.height;
++    unsigned char* rgba = (unsigned char*)malloc(pixel_count * 4);
++    if (!rgba) {
++        png_image_free(&image);
++        return 0;
++    }
++    if (!png_image_finish_read(&image, NULL, rgba, 0, NULL)) {
++        free(rgba);
++        png_image_free(&image);
++        return 0;
++    }
++    unsigned char* pixels = (unsigned char*)malloc(pixel_count * 3);
++    if (!pixels) {
++        free(rgba);
++        png_image_free(&image);
++        return 0;
++    }
++    for (size_t i = 0; i < pixel_count; ++i) {
++        pixels[3 * i] = rgba[4 * i];
++        pixels[3 * i + 1] = rgba[4 * i + 1];
++        pixels[3 * i + 2] = rgba[4 * i + 2];
++    }
++    free(rgba);
++    output->pixels = pixels;
++    output->width = (int)image.width;
++    output->height = (int)image.height;
++    png_image_free(&image);
++    return 1;
++}
 +
-+Do not point this initial run at an existing OrcaSlicer or Cura configuration.
-+Once the GUI starts, use its import workflow to copy profiles rather than
-+moving or overwriting source profiles. OrcaSlicer user preset `.json` and
-+`.info` pairs can also be copied into the new data directory's
-+`user/default/<preset-type>/` folder after the corresponding system printer
-+has been enabled. Keep Cura configurations separate: Cura's `.cfg` format is
-+not directly importable as an OrcaCubic preset.
++static int decode_jpeg(const unsigned char* data, size_t size, TextureDecodedRGB* output)
++{
++    if (size > ULONG_MAX)
++        return 0;
++    struct jpeg_decompress_struct decoder;
++    struct jpeg_error_context error;
++    memset(&decoder, 0, sizeof(decoder));
++    decoder.err = jpeg_std_error(&error.manager);
++    error.manager.error_exit = jpeg_error_exit;
++    if (setjmp(error.recovery)) {
++        jpeg_destroy_decompress(&decoder);
++        free_texture_decoded_rgb(output);
++        return 0;
++    }
++    jpeg_create_decompress(&decoder);
++    jpeg_mem_src(&decoder, (unsigned char*)data, (unsigned long)size);
++    if (jpeg_read_header(&decoder, TRUE) != JPEG_HEADER_OK) {
++        jpeg_destroy_decompress(&decoder);
++        return 0;
++    }
++    decoder.out_color_space = JCS_RGB;
++    jpeg_start_decompress(&decoder);
++    if (decoder.output_components != 3
++        || !valid_dimensions(decoder.output_width, decoder.output_height)) {
++        jpeg_destroy_decompress(&decoder);
++        return 0;
++    }
++    output->width = (int)decoder.output_width;
++    output->height = (int)decoder.output_height;
++    output->pixels = (unsigned char*)malloc((size_t)output->width * output->height * 3);
++    if (!output->pixels) {
++        jpeg_destroy_decompress(&decoder);
++        return 0;
++    }
++    while (decoder.output_scanline < decoder.output_height) {
++        JSAMPROW row = output->pixels + (size_t)decoder.output_scanline * output->width * 3;
++        jpeg_read_scanlines(&decoder, &row, 1);
++    }
++    jpeg_finish_decompress(&decoder);
++    jpeg_destroy_decompress(&decoder);
++    return 1;
++}
 +
-+## Current validation boundary
++int decode_texture_rgb(const unsigned char* data, size_t size, TextureDecodedRGB* output)
++{
++    if (!output)
++        return 0;
++    output->pixels = NULL;
++    output->width = 0;
++    output->height = 0;
++    if (!data || size < 3)
++        return 0;
++    if (size >= 8 && png_sig_cmp((png_const_bytep)data, 0, 8) == 0)
++        return decode_png(data, size, output);
++    if (data[0] == 0xff && data[1] == 0xd8)
++        return decode_jpeg(data, size, output);
++    return 0;
++}
 +
-+The native binary builds and launches its GUI on FreeBSD 13.5/GTK3. A copied
-+OrcaSlicer filament preset and locally converted Cura printer/process/filament
-+presets were loaded and selected with an isolated `--datadir`; a small model
-+also sliced successfully through the command-line path. With a loopback-only
-+Kobra X test profile, the GUI launched and stopped the bundled Python bridge
-+correctly. These tests do not establish physical print safety. A full GUI
-+slice, Kobra X LAN handshake, OctoPrint connection, and printer-side
-+validation remain pending. In particular, do not send command-line test
-+G-code to a printer unless the full machine profile and its inherited
-+settings were loaded and reviewed.
++void free_texture_decoded_rgb(TextureDecodedRGB* image)
++{
++    if (image) {
++        free(image->pixels);
++        image->pixels = NULL;
++        image->width = 0;
++        image->height = 0;
++    }
++}
+diff --git a/src/libslic3r/TextureToColor/TextureDecode.h b/src/libslic3r/TextureToColor/TextureDecode.h
+new file mode 100644
+index 00000000..d9ecb439
+--- /dev/null
++++ b/src/libslic3r/TextureToColor/TextureDecode.h
+@@ -0,0 +1,22 @@
++#pragma once
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct TextureDecodedRGB {
++    unsigned char* pixels; // top-down RGB, tightly packed
++    int width;
++    int height;
++} TextureDecodedRGB;
++
++// Decode an embedded PNG or JPEG image. The caller owns pixels and releases
++// it with free_texture_decoded_rgb. Returns zero for unsupported/corrupt data.
++int decode_texture_rgb(const unsigned char* data, size_t size, TextureDecodedRGB* output);
++void free_texture_decoded_rgb(TextureDecodedRGB* image);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/slic3r/GUI/SkipPartContours.cpp b/src/slic3r/GUI/SkipPartContours.cpp
+new file mode 100644
+index 00000000..5d90328a
+--- /dev/null
++++ b/src/slic3r/GUI/SkipPartContours.cpp
+@@ -0,0 +1,187 @@
++#include "SkipPartContours.hpp"
++
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <limits>
++#include <unordered_map>
++
++namespace Slic3r::GUI {
++namespace {
++
++struct Edge {
++    std::size_t from;
++    std::size_t to;
++    int direction; // east, south, west, north (image coordinates)
++    bool used = false;
++};
++
++std::uint32_t pixel_id(const unsigned char* rgb, std::size_t pixel)
++{
++    const auto* p = rgb + 3 * pixel;
++    return std::uint32_t(p[0]) | (std::uint32_t(p[1]) << 8) | (std::uint32_t(p[2]) << 16);
++}
++
++long long twice_area(const std::vector<MaskPoint>& ring)
++{
++    long long area = 0;
++    for (std::size_t i = 0; i < ring.size(); ++i) {
++        const auto& a = ring[i];
++        const auto& b = ring[(i + 1) % ring.size()];
++        area += static_cast<long long>(a.x) * b.y - static_cast<long long>(b.x) * a.y;
++    }
++    return area;
++}
++
++void remove_straight_vertices(std::vector<MaskPoint>& ring)
++{
++    if (ring.size() < 3)
++        return;
++    std::vector<MaskPoint> compact;
++    compact.reserve(ring.size());
++    for (std::size_t i = 0; i < ring.size(); ++i) {
++        const auto& prev = ring[(i + ring.size() - 1) % ring.size()];
++        const auto& here = ring[i];
++        const auto& next = ring[(i + 1) % ring.size()];
++        const long long cross = static_cast<long long>(here.x - prev.x) * (next.y - here.y)
++                              - static_cast<long long>(here.y - prev.y) * (next.x - here.x);
++        if (cross != 0)
++            compact.push_back(here);
++    }
++    ring.swap(compact);
++}
++
++std::vector<std::vector<MaskPoint>> trace_rings(const std::vector<std::size_t>& pixels,
++                                                 const std::vector<int>& labels,
++                                                 int component, int width, int height)
++{
++    const std::size_t vertex_width = std::size_t(width) + 1;
++    auto vertex = [vertex_width](int x, int y) { return std::size_t(y) * vertex_width + x; };
++    auto belongs = [&](int x, int y) {
++        return x >= 0 && y >= 0 && x < width && y < height
++            && labels[std::size_t(y) * width + x] == component;
++    };
++
++    std::vector<Edge> edges;
++    std::unordered_map<std::size_t, std::vector<std::size_t>> outgoing;
++    auto add_edge = [&](std::size_t from, std::size_t to, int direction) {
++        outgoing[from].push_back(edges.size());
++        edges.push_back({from, to, direction, false});
++    };
++    for (std::size_t pixel : pixels) {
++        const int x = static_cast<int>(pixel % width);
++        const int y = static_cast<int>(pixel / width);
++        if (!belongs(x, y - 1)) add_edge(vertex(x, y), vertex(x + 1, y), 0);
++        if (!belongs(x + 1, y)) add_edge(vertex(x + 1, y), vertex(x + 1, y + 1), 1);
++        if (!belongs(x, y + 1)) add_edge(vertex(x + 1, y + 1), vertex(x, y + 1), 2);
++        if (!belongs(x - 1, y)) add_edge(vertex(x, y + 1), vertex(x, y), 3);
++    }
++
++    std::vector<std::vector<MaskPoint>> rings;
++    for (std::size_t first = 0; first < edges.size(); ++first) {
++        if (edges[first].used)
++            continue;
++        std::vector<MaskPoint> ring;
++        std::size_t current = first;
++        bool closed = false;
++        for (std::size_t steps = 0; steps < edges.size(); ++steps) {
++            Edge& edge = edges[current];
++            edge.used = true;
++            ring.push_back({static_cast<int>(edge.from % vertex_width),
++                            static_cast<int>(edge.from / vertex_width)});
++            if (edge.to == edges[first].from) {
++                closed = true;
++                break;
++            }
++            const auto next_it = outgoing.find(edge.to);
++            if (next_it == outgoing.end())
++                break;
++            std::size_t next = edges.size();
++            int best_turn = 4;
++            for (std::size_t candidate : next_it->second) {
++                if (edges[candidate].used)
++                    continue;
++                // Turn right at a shared corner so two loops that touch at
++                // one vertex do not get spliced into a self-intersecting ring.
++                const int turn = (edges[candidate].direction - edge.direction + 4) % 4;
++                const int rank = turn == 1 ? 0 : turn == 0 ? 1 : turn == 3 ? 2 : 3;
++                if (rank < best_turn) {
++                    best_turn = rank;
++                    next = candidate;
++                }
++            }
++            if (next == edges.size())
++                break;
++            current = next;
++        }
++        if (closed) {
++            remove_straight_vertices(ring);
++            if (ring.size() >= 3 && twice_area(ring) != 0)
++                rings.push_back(std::move(ring));
++        }
++    }
++    // Clockwise outer boundary has positive area in top-down image space;
++    // counter-clockwise hole boundaries follow it for mapbox::earcut.
++    std::stable_sort(rings.begin(), rings.end(), [](const auto& a, const auto& b) {
++        return twice_area(a) > twice_area(b);
++    });
++    return rings;
++}
++
++} // namespace
++
++std::vector<MaskComponent> extract_mask_components(const unsigned char* rgb, int width, int height)
++{
++    if (!rgb || width <= 0 || height <= 0
++        || std::size_t(width) > std::numeric_limits<std::size_t>::max() / std::size_t(height))
++        return {};
++
++    const std::size_t count = std::size_t(width) * height;
++    std::vector<int> labels(count, -1);
++    std::vector<MaskComponent> components;
++    for (std::size_t start = 0; start < count; ++start) {
++        if (labels[start] >= 0 || pixel_id(rgb, start) == 0)
++            continue;
++        if (components.size() >= static_cast<std::size_t>(std::numeric_limits<int>::max()))
++            break;
++        const int component = static_cast<int>(components.size());
++        std::vector<std::size_t> pixels{start};
++        labels[start] = component;
++        std::unordered_map<std::uint32_t, std::size_t> counts;
++        for (std::size_t i = 0; i < pixels.size(); ++i) {
++            const std::size_t pixel = pixels[i];
++            ++counts[pixel_id(rgb, pixel)];
++            const int x = static_cast<int>(pixel % width);
++            const int y = static_cast<int>(pixel / width);
++            const std::array<std::pair<int, int>, 4> neighbors = {{{x - 1, y}, {x + 1, y}, {x, y - 1}, {x, y + 1}}};
++            for (const auto& neighbor : neighbors) {
++                if (neighbor.first < 0 || neighbor.second < 0 || neighbor.first >= width || neighbor.second >= height)
++                    continue;
++                const std::size_t next = std::size_t(neighbor.second) * width + neighbor.first;
++                if (labels[next] < 0 && pixel_id(rgb, next) != 0) {
++                    labels[next] = component;
++                    pixels.push_back(next);
++                }
++            }
++        }
++
++        std::uint32_t majority_id = 0;
++        std::size_t majority_count = 0;
++        for (const auto& item : counts) {
++            if (item.second > majority_count) {
++                majority_id = item.first;
++                majority_count = item.second;
++            }
++        }
++        MaskComponent output{majority_id, {}};
++        if (majority_count > pixels.size() / 2)
++            output.rings = trace_rings(pixels, labels, component, width, height);
++        components.push_back(std::move(output));
++    }
++    components.erase(std::remove_if(components.begin(), components.end(), [](const auto& component) {
++        return component.id == 0 || component.rings.empty();
++    }), components.end());
++    return components;
++}
++
++} // namespace Slic3r::GUI
+diff --git a/src/slic3r/GUI/SkipPartContours.hpp b/src/slic3r/GUI/SkipPartContours.hpp
+new file mode 100644
+index 00000000..0acbc074
+--- /dev/null
++++ b/src/slic3r/GUI/SkipPartContours.hpp
+@@ -0,0 +1,24 @@
++#pragma once
++
++#include <cstdint>
++#include <vector>
++
++namespace Slic3r::GUI {
++
++struct MaskPoint {
++    int x;
++    int y;
++};
++
++struct MaskComponent {
++    std::uint32_t id;
++    // Outer ring first, followed by any holes. Coordinates are pixel corners.
++    std::vector<std::vector<MaskPoint>> rings;
++};
++
++// Extract selectable regions from a top-down, tightly packed RGB pick image.
++// A region must have a strict majority of one encoded part ID, as in the old
++// OpenCV contour path. Black pixels are background.
++std::vector<MaskComponent> extract_mask_components(const unsigned char* rgb, int width, int height);
++
++} // namespace Slic3r::GUI
+diff --git a/tests/SkipPartContoursTest.cpp b/tests/SkipPartContoursTest.cpp
+new file mode 100644
+index 00000000..65e4c02c
+--- /dev/null
++++ b/tests/SkipPartContoursTest.cpp
+@@ -0,0 +1,153 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "slic3r/GUI/SkipPartContours.hpp"
++#include <earcut/earcut.hpp>
++
++#include <array>
++#include <cassert>
++#include <cstdint>
++#include <vector>
++
++using Slic3r::GUI::MaskPoint;
++using Slic3r::GUI::extract_mask_components;
++
++static long long area2(const std::vector<MaskPoint>& ring)
++{
++    long long area = 0;
++    for (std::size_t i = 0; i < ring.size(); ++i) {
++        const auto& a = ring[i];
++        const auto& b = ring[(i + 1) % ring.size()];
++        area += static_cast<long long>(a.x) * b.y - static_cast<long long>(b.x) * a.y;
++    }
++    return area;
++}
++
++static void set_pixel(std::vector<unsigned char>& image, int width, int x, int y, unsigned char id)
++{
++    image[3 * (y * width + x)] = id;
++}
++
++int main()
++{
++    {
++        std::vector<unsigned char> image(3 * 4 * 4, 0);
++        for (int y = 1; y <= 2; ++y)
++            for (int x = 1; x <= 2; ++x)
++                set_pixel(image, 4, x, y, 7);
++        auto parts = extract_mask_components(image.data(), 4, 4);
++        assert(parts.size() == 1 && parts[0].id == 7);
++        assert(parts[0].rings.size() == 1);
++        assert(parts[0].rings[0].size() == 4);
++        assert(area2(parts[0].rings[0]) == 8);
++    }
++    {
++        std::vector<unsigned char> image(3 * 5 * 5, 0);
++        for (int y = 0; y < 5; ++y)
++            for (int x = 0; x < 5; ++x)
++                if (x != 2 || y != 2)
++                    set_pixel(image, 5, x, y, 8);
++        auto parts = extract_mask_components(image.data(), 5, 5);
++        assert(parts.size() == 1 && parts[0].id == 8);
++        assert(parts[0].rings.size() == 2);
++        assert(area2(parts[0].rings[0]) == 50);
++        assert(area2(parts[0].rings[1]) == -2);
++        std::vector<std::vector<std::array<float, 2>>> polygon;
++        std::vector<std::array<float, 2>> flat;
++        for (const auto& ring : parts[0].rings) {
++            polygon.emplace_back();
++            for (const auto& point : ring) {
++                std::array<float, 2> p{float(point.x), float(point.y)};
++                polygon.back().push_back(p);
++                flat.push_back(p);
++            }
++        }
++        auto triangles = mapbox::earcut<std::uint32_t>(polygon);
++        long long triangulated_area2 = 0;
++        for (std::size_t i = 0; i < triangles.size(); i += 3) {
++            const auto& a = flat[triangles[i]];
++            const auto& b = flat[triangles[i + 1]];
++            const auto& c = flat[triangles[i + 2]];
++            const long long twice = static_cast<long long>((b[0] - a[0]) * (c[1] - a[1])
++                                                        - (c[0] - a[0]) * (b[1] - a[1]));
++            triangulated_area2 += twice < 0 ? -twice : twice;
++        }
++        assert(triangulated_area2 == 48);
++    }
++    {
++        std::vector<unsigned char> image(3 * 3, 0);
++        set_pixel(image, 3, 0, 0, 9);
++        set_pixel(image, 3, 2, 0, 10);
++        auto parts = extract_mask_components(image.data(), 3, 1);
++        assert(parts.size() == 2);
++        assert(parts[0].id == 9 && parts[1].id == 10);
++    }
++    {
++        std::vector<unsigned char> image(3 * 3, 0);
++        set_pixel(image, 3, 0, 0, 11);
++        set_pixel(image, 3, 1, 0, 11);
++        set_pixel(image, 3, 2, 0, 12);
++        auto parts = extract_mask_components(image.data(), 3, 1);
++        assert(parts.size() == 1 && parts[0].id == 11);
++        set_pixel(image, 3, 2, 0, 12);
++        set_pixel(image, 3, 1, 0, 12);
++        parts = extract_mask_components(image.data(), 3, 1);
++        assert(parts.size() == 1 && parts[0].id == 12);
++    }
++    {
++        std::vector<unsigned char> image(3 * 2, 0);
++        set_pixel(image, 2, 0, 0, 11);
++        set_pixel(image, 2, 1, 0, 12);
++        assert(extract_mask_components(image.data(), 2, 1).empty());
++    }
++    {
++        // Irregular components exercise concave boundaries, touching corners,
++        // and holes beyond the hand-written rectangle cases.
++        std::uint32_t random_state = 0x8375a9d2;
++        for (int case_no = 0; case_no < 1000; ++case_no) {
++            std::vector<unsigned char> image(3 * 16 * 16, 0);
++            int foreground_pixels = 0;
++            for (int y = 0; y < 16; ++y) {
++                for (int x = 0; x < 16; ++x) {
++                    random_state = random_state * 1664525u + 1013904223u;
++                    if ((random_state >> 24) < 115) {
++                        set_pixel(image, 16, x, y, 13);
++                        ++foreground_pixels;
++                    }
++                }
++            }
++            auto parts = extract_mask_components(image.data(), 16, 16);
++            long long total_area2 = 0;
++            for (const auto& part : parts) {
++                assert(part.id == 13);
++                std::vector<std::vector<std::array<float, 2>>> polygon;
++                std::vector<std::array<float, 2>> flat;
++                for (const auto& ring : part.rings) {
++                    total_area2 += area2(ring);
++                    polygon.emplace_back();
++                    for (const auto& point : ring) {
++                        std::array<float, 2> p{float(point.x), float(point.y)};
++                        polygon.back().push_back(p);
++                        flat.push_back(p);
++                    }
++                }
++                const auto triangles = mapbox::earcut<std::uint32_t>(polygon);
++                long long triangles_area2 = 0;
++                for (std::size_t i = 0; i < triangles.size(); i += 3) {
++                    const auto& a = flat[triangles[i]];
++                    const auto& b = flat[triangles[i + 1]];
++                    const auto& c = flat[triangles[i + 2]];
++                    const long long twice = static_cast<long long>((b[0] - a[0]) * (c[1] - a[1])
++                                                                - (c[0] - a[0]) * (b[1] - a[1]));
++                    triangles_area2 += twice < 0 ? -twice : twice;
++                }
++                long long component_area2 = 0;
++                for (const auto& ring : part.rings)
++                    component_area2 += area2(ring);
++                assert(triangles_area2 == component_area2);
++            }
++            assert(total_area2 == foreground_pixels * 2);
++        }
++    }
++}
+diff --git a/tests/TextureDecodeTest.c b/tests/TextureDecodeTest.c
+new file mode 100644
+index 00000000..d8ba07e1
+--- /dev/null
++++ b/tests/TextureDecodeTest.c
+@@ -0,0 +1,86 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "libslic3r/TextureToColor/TextureDecode.h"
++
++#include <assert.h>
++#include <stdio.h>
++#include <jpeglib.h>
++#include <png.h>
++#include <stdlib.h>
++#include <string.h>
++
++int main(void)
++{
++    const unsigned char pixels[12] = {
++        255, 0, 0,   0, 255, 0,
++        0, 0, 255,   255, 255, 255
++    };
++
++    png_image png;
++    memset(&png, 0, sizeof(png));
++    png.version = PNG_IMAGE_VERSION;
++    png.width = 2;
++    png.height = 2;
++    png.format = PNG_FORMAT_RGB;
++    size_t png_size = 0;
++    assert(png_image_write_to_memory(&png, NULL, &png_size, 0, pixels, 0, NULL));
++    unsigned char* png_data = (unsigned char*)malloc(png_size);
++    assert(png_data);
++    assert(png_image_write_to_memory(&png, png_data, &png_size, 0, pixels, 0, NULL));
++    TextureDecodedRGB decoded = {0};
++    assert(decode_texture_rgb(png_data, png_size, &decoded));
++    assert(decoded.width == 2 && decoded.height == 2);
++    assert(memcmp(decoded.pixels, pixels, sizeof(pixels)) == 0);
++    free_texture_decoded_rgb(&decoded);
++    free(png_data);
++
++    // An alpha channel must be discarded, not composited over black.
++    const unsigned char transparent_red[4] = {255, 0, 0, 0};
++    png.format = PNG_FORMAT_RGBA;
++    png.width = 1;
++    png.height = 1;
++    png_size = 0;
++    assert(png_image_write_to_memory(&png, NULL, &png_size, 0, transparent_red, 0, NULL));
++    png_data = (unsigned char*)malloc(png_size);
++    assert(png_data);
++    assert(png_image_write_to_memory(&png, png_data, &png_size, 0, transparent_red, 0, NULL));
++    assert(decode_texture_rgb(png_data, png_size, &decoded));
++    assert(decoded.width == 1 && decoded.height == 1);
++    assert(decoded.pixels[0] == 255 && decoded.pixels[1] == 0 && decoded.pixels[2] == 0);
++    free_texture_decoded_rgb(&decoded);
++    free(png_data);
++
++    struct jpeg_compress_struct compressor;
++    struct jpeg_error_mgr error;
++    compressor.err = jpeg_std_error(&error);
++    jpeg_create_compress(&compressor);
++    unsigned char* jpeg_data = NULL;
++    unsigned long jpeg_size = 0;
++    jpeg_mem_dest(&compressor, &jpeg_data, &jpeg_size);
++    compressor.image_width = 2;
++    compressor.image_height = 2;
++    compressor.input_components = 3;
++    compressor.in_color_space = JCS_RGB;
++    jpeg_set_defaults(&compressor);
++    jpeg_set_quality(&compressor, 100, TRUE);
++    jpeg_start_compress(&compressor, TRUE);
++    while (compressor.next_scanline < compressor.image_height) {
++        JSAMPROW row = (JSAMPROW)(pixels + compressor.next_scanline * 2 * 3);
++        jpeg_write_scanlines(&compressor, &row, 1);
++    }
++    jpeg_finish_compress(&compressor);
++    jpeg_destroy_compress(&compressor);
++    assert(decode_texture_rgb(jpeg_data, jpeg_size, &decoded));
++    assert(decoded.width == 2 && decoded.height == 2);
++    free_texture_decoded_rgb(&decoded);
++    free(jpeg_data);
++
++    const unsigned char corrupt_jpeg[] = {0xff, 0xd8, 0xff, 0xd9};
++    assert(!decode_texture_rgb(corrupt_jpeg, sizeof(corrupt_jpeg), &decoded));
++    assert(decoded.pixels == NULL);
++    const unsigned char not_an_image[] = {1, 2, 3, 4};
++    assert(!decode_texture_rgb(not_an_image, sizeof(not_an_image), &decoded));
++    return 0;
++}
+diff --git a/tests/ObjColorUtilsTest.cpp b/tests/ObjColorUtilsTest.cpp
+new file mode 100644
+index 00000000..8079a4d1
+--- /dev/null
++++ b/tests/ObjColorUtilsTest.cpp
+@@ -0,0 +1,52 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "libslic3r/ObjColorUtils.hpp"
++
++#include <cassert>
++
++int main()
++{
++    std::vector<Slic3r::RGBA> colors = {
++        {1.f, 0.f, 0.f, 1.f}, {1.f, 0.f, 0.f, 1.f},
++        {0.f, 0.f, 1.f, 1.f}, {0.f, 0.f, 1.f, 1.f}
++    };
++    std::vector<Slic3r::RGBA> centers;
++    std::vector<int> labels;
++    char requested = 2;
++    assert(obj_color_deal_algo(colors, centers, labels, requested, 4));
++    assert(centers.size() == 2 && labels.size() == colors.size());
++    assert(labels[0] == labels[1] && labels[2] == labels[3]);
++    assert(labels[0] != labels[2]);
++    assert(centers[labels[0]][0] > 0.9f && centers[labels[0]][2] < 0.1f);
++    assert(centers[labels[2]][2] > 0.9f && centers[labels[2]][0] < 0.1f);
++
++    requested = -1;
++    assert(obj_color_deal_algo(colors, centers, labels, requested, 2));
++    assert(centers.size() == 2 && labels.size() == colors.size());
++
++    requested = 1;
++    assert(obj_color_deal_algo(colors, centers, labels, requested, 4));
++    assert(centers.size() == 1 && labels.size() == colors.size());
++    for (int label : labels)
++        assert(label == 0);
++
++    requested = 4;
++    assert(obj_color_deal_algo(colors, centers, labels, requested, 2));
++    assert(centers.size() == 2);
++    for (int label : labels)
++        assert(label >= 0 && label < static_cast<int>(centers.size()));
++
++    colors.assign(9, {1.f, 0.f, 0.f, 1.f});
++    colors.push_back({0.f, 0.f, 1.f, 1.f});
++    requested = 1;
++    assert(obj_color_deal_algo(colors, centers, labels, requested, 4));
++    assert(centers.size() == 1 && labels.size() == colors.size());
++    assert(centers[0][0] > 0.85f && centers[0][2] < 0.15f);
++
++    colors.clear();
++    assert(!obj_color_deal_algo(colors, centers, labels, requested, 4));
++    assert(centers.empty() && labels.empty());
++    return 0;
++}
+diff --git a/tests/data/opencv_removal/colored_tetra.obj b/tests/data/opencv_removal/colored_tetra.obj
+new file mode 100644
+index 00000000..3f536c00
+--- /dev/null
++++ b/tests/data/opencv_removal/colored_tetra.obj
+@@ -0,0 +1,8 @@
++v 0 0 0 1 0 0
++v 20 0 0 1 0 0
++v 0 20 0 0 0 1
++v 0 0 20 0 0 1
++f 1 3 2
++f 1 2 4
++f 2 3 4
++f 3 1 4
+diff --git a/tests/data/opencv_removal/textured_tetra.obj b/tests/data/opencv_removal/textured_tetra.obj
+new file mode 100644
+index 00000000..23615be5
+--- /dev/null
++++ b/tests/data/opencv_removal/textured_tetra.obj
+@@ -0,0 +1,14 @@
++mtllib textured_tetra.mtl
++v 0 0 0
++v 20 0 0
++v 0 20 0
++v 0 0 20
++vt 0 0
++vt 1 0
++vt 0 1
++vt 1 1
++usemtl test_texture
++f 1/1 3/3 2/2
++f 1/1 2/2 4/4
++f 2/2 3/3 4/4
++f 3/3 1/1 4/4
+diff --git a/tests/data/opencv_removal/textured_tetra.mtl b/tests/data/opencv_removal/textured_tetra.mtl
+new file mode 100644
+index 00000000..43609248
+--- /dev/null
++++ b/tests/data/opencv_removal/textured_tetra.mtl
+@@ -0,0 +1,3 @@
++newmtl test_texture
++Kd 1.0 1.0 1.0
++map_Kd ../../../resources/images/OrcaSlicer_32px.png

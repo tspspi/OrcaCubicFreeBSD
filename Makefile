@@ -21,14 +21,12 @@ LIB_DEPENDS=	libassimp.so:multimedia/assimp \
 		libavutil.so:multimedia/ffmpeg \
 		libswscale.so:multimedia/ffmpeg \
 		libfontconfig.so:x11-fonts/fontconfig \
-		libfreeimage.so:graphics/freeimage \
 		libfreetype.so:print/freetype2 \
 		libglfw.so:graphics/glfw \
 		libgmp.so:math/gmp \
 		libhidapi.so:comms/hidapi \
 		libnoise.so:audio/libnoise \
 		libnlopt.so:math/nlopt \
-		libopencv_core.so:graphics/opencv \
 		libopenvdb.so:misc/openvdb \
 		libmpfr.so:math/mpfr \
 		libpng16.so:graphics/png \
