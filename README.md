@@ -24,6 +24,12 @@ source download can also take a while. On FreeBSD 13.5, whose release is no
 longer supported by the current Ports tree, add `ALLOW_UNSUPPORTED_SYSTEM=yes`
 to the make command.
 
+This snapshot no longer builds or directly depends on OpenCV. PNG and JPEG
+textures use libpng and libjpeg; the GUI uses its existing wxWidgets image
+handlers for other supported formats, including BMP. OpenCascade still brings
+in FreeImage indirectly on FreeBSD, so this does not remove every imaging
+library from the complete dependency tree.
+
 ## Running it
 
 OrcaCubic needs access to the graphics device nodes. Each user who runs it
@@ -54,10 +60,11 @@ orcacubic --datadir ~/.OrcaCubic
 ## Status
 
 The application has been built and run on FreeBSD 13.5/amd64. Port fetch,
-patch, and configure were checked. Staging and packaging were checked using
-an already-built binary; a complete build from a fresh port work directory
-has not yet been run. This is a local port snapshot, not a FreeBSD Ports
-submission.
+patch, configure, build, stage, `check-plist`, and package creation have been
+checked. The final patch also applied cleanly to a separate fresh source
+extraction. The port-built executable imports a test model, and the GUI
+successfully imported a BMP-textured OBJ using an isolated test configuration.
+This is a local port snapshot, not a FreeBSD Ports submission.
 
 Kobra X LAN upload and print start have been tested with pre-engage disabled;
 completion of a print has not been verified. The Kobra X camera stream is not
